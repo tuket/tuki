@@ -514,9 +514,9 @@ VkSampler Device::createSampler(Filter minFilter, Filter magFilter, SamplerMipma
 	return createSampler(info);
 }
 
-void Device::destroySampler()
+void Device::destroySampler(VkSampler sampler)
 {
-
+	vkDestroySampler(device, sampler, nullptr);
 }
 
 VkCommandPool Device::createCmdPool(u32 queueFamily, CmdPoolOptions options)

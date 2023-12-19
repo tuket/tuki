@@ -1010,7 +1010,7 @@ struct Device
 
 	VkSampler createSampler(const SamplerInfo& info);
 	VkSampler createSampler(Filter minFilter, Filter magFilter, SamplerMipmapMode mipmapMode, SamplerAddressMode addressMode);
-	void destroySampler();
+	void destroySampler(VkSampler sampler);
 
 	VkCommandPool createCmdPool(u32 queueFamily, CmdPoolOptions options);
 	void allocCmdBuffers(VkCommandPool pool, std::span<CmdBuffer> cmdBuffers, bool secondary = false);

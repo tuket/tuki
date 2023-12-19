@@ -24,6 +24,8 @@ struct RenderUniverse
 
 	vk::Format depthStencilFormat;
 	u32 screenW = 0, screenH = 0;
+	u32 oldScreenW, oldScreenH = 0;
+	vk::SwapchainOptions swapchainOptions;
 	vk::SwapchainSyncHelper swapchain;
 	vk::Image depthStencilImages[MAX_SWAPCHAIN_IMAGES];
 	vk::ImageView depthStencilImageViews[MAX_SWAPCHAIN_IMAGES];
@@ -875,8 +877,8 @@ static void begingStagingCmdRecordingForNextFrame()
 // *** INIT RENDER UNIVERSE ***
 void initRenderUniverse(const InitRenderUniverseParams& params)
 {
-	RU.screenW = params.screenW;
-	RU.screenH = params.screenH;
+	RU.oldScreenW = RU.screenW = params.screenW;
+	RU.oldScreenH = RU.screenH = params.screenH;
 	RU.surface = params.surface;
 	{ // create device
 		std::vector<vk::PhysicalDeviceInfo> physicalDeviceInfos;
@@ -911,8 +913,8 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 	RU.depthStencilFormat = RU.device.getSupportedDepthStencilFormat_firstAmong(bufferDepthStencilFormats);
 
 	// create swapchain
-	const vk::SwapchainOptions swapchainOptions = {};
-	vk::ASSERT_VKRES(vk::createSwapchainSyncHelper(RU.swapchain, RU.surface, RU.device, swapchainOptions));
+	RU.swapchainOptions = {};
+	vk::ASSERT_VKRES(vk::createSwapchainSyncHelper(RU.swapchain, RU.surface, RU.device, RU.swapchainOptions));
 
 	RU.renderPass = [&]() {
 		vk::FbAttachmentInfo attachments[] = {
@@ -944,7 +946,7 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 
 	RU.shaderCompiler.init();
 
-	vk::ASSERT_VKRES(vk::createSwapchainSyncHelper(RU.swapchain, RU.surface, RU.device, swapchainOptions));
+	vk::ASSERT_VKRES(vk::createSwapchainSyncHelper(RU.swapchain, RU.surface, RU.device, RU.swapchainOptions));
 
 	RU.cmdPool = RU.device.createCmdPool(RU.queueFamily, { .transientCmdBuffers = true, .reseteableCmdBuffers = true });
 	RU.device.allocCmdBuffers(RU.cmdPool, RU.cmdBuffers_staging, false);
@@ -969,7 +971,10 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 
 void onWindowResized(u32 w, u32 h)
 {
-	// TODO
+	RU.oldScreenW = RU.screenW;
+	RU.oldScreenH = RU.screenH;
+	RU.screenW = w;
+	RU.screenH = h;
 }
 
 ShaderCompiler& getShaderCompiler()
@@ -1068,12 +1073,26 @@ ObjectId RenderWorldId::createObject(MeshRC mesh, const glm::mat4& modelMtx)
 {
 	return RU.renderWorlds[id].createObject(std::move(mesh), modelMtx);
 }
+ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices)
+{
+	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), instancesMatrices);
+}
 ObjectId RenderWorld::createObject(MeshRC mesh, const glm::mat4& modelMtx)
 {
 	const u32 e = acquireObjectEntry(*this);
 	objects_info[e] = { mesh, 1 };
 	objects_firstModelMtx[e] = u32(modelMatrices.size());
 	modelMatrices.push_back(modelMtx);
+	return ObjectId(id, {e});
+}
+
+ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices)
+{
+	const u32 e = acquireObjectEntry(*this);
+	objects_info[e] = { mesh, u32(instancesMatrices.size()) };
+	objects_firstModelMtx[e] = u32(modelMatrices.size());
+	for (auto& m : instancesMatrices)
+		modelMatrices.push_back(m);
 	return ObjectId(id, {e});
 }
 
@@ -1235,22 +1254,26 @@ static void draw_renderWorld(RenderWorldId renderWorldId, const RenderWorldViewp
 
 void draw(CSpan<RenderWorldViewport> viewports)
 {
-	/*if (screenW != oldScreenW || screenH != oldScreenH) {
+	if (RU.screenW != RU.oldScreenW || RU.screenH != RU.oldScreenH) {
 		// detect window resize -> recreate the swapchain
-		device.waitIdle();
-		tvk::createSwapchainSyncHelper(swapchain, surface, device, swapchainOptions);
-		for (u32 i = 0; i < swapchain.numImages; i++) {
-			device.destroyFramebuffer(framebuffers[i]);
-			framebuffers[i] = VK_NULL_HANDLE;
+		RU.device.waitIdle();
+		vk::createSwapchainSyncHelper(RU.swapchain, RU.surface, RU.device, RU.swapchainOptions);
+		for (u32 i = 0; i < RU.swapchain.numImages; i++) {
+			RU.device.destroyImage(RU.depthStencilImages[i]);
+			RU.device.destroyImageView(RU.depthStencilImageViews[i]);
+			RU.device.destroyFramebuffer(RU.framebuffers[i]);
+			RU.framebuffers[i] = VK_NULL_HANDLE;
 		}
-		oldScreenW = screenW;
-		oldScreenH = screenH;
-	}*/
+		RU.oldScreenW = RU.screenW;
+		RU.oldScreenH = RU.screenH;
 
-	const auto mainQueue = RU.device.queues[0][0];
+		//RU.cmdBuffers_staging[RU.cmdBuffers_staging_ind].end();
+		//begingStagingCmdRecordingForNextFrame();
+	}
+
 	RU.swapchain.acquireNextImage(RU.device);
 
-	// CPU stuff here?
+	const auto mainQueue = RU.device.queues[0][0];
 
 	RU.swapchain.waitCanStartFrame(RU.device);
 	const u32 scImgInd = RU.swapchain.imgInd;
@@ -1340,7 +1363,7 @@ void draw(CSpan<RenderWorldViewport> viewports)
 	{
 		const std::tuple<VkSemaphore, vk::PipelineStages> waitSemaphores[] = {
 			{
-				RU.swapchain.semaphore_imageAvailable[scImgInd],
+				RU.swapchain.semaphore_imageAvailable[RU.swapchain.frameInd],
 				vk::PipelineStages::colorAttachmentOutput
 			}
 		};

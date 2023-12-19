@@ -306,7 +306,7 @@ struct ObjectId : IdU32 {
 // RENDER WORLDS
 struct RenderWorldId : IdU32 {
     ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1));
-    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> modelMatrices);
+    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices);
 };
 struct RenderWorld {
     struct ObjectMatrices {
@@ -333,7 +333,7 @@ struct RenderWorld {
     glm::vec3 ambientLight = glm::vec3(0.1f);
 
     ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1));
-    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> modelMatrices);
+    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices);
     void destroyObject(ObjectId oid);
     void _defragmentObjects();
 };

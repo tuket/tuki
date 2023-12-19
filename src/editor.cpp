@@ -4,6 +4,7 @@
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/transform.hpp>
 
 namespace tvk = tk::vk;
 using tk::CSpan;
@@ -11,8 +12,8 @@ using tk::u8;
 using tk::u32;
 
 static u32 cubeInds[6*6] = {
-	0, 2, 1, 1, 2, 3,
-	4+0, 4+1, 4+2, 4+1, 4+3, 4+2,
+	0, 1, 3, 0, 3, 2,
+	4+0, 4+1, 4+3, 4+0, 4+3, 4+2,
 };
 static const glm::vec3 cubeVerts_positions[] = {
 	// -X
@@ -21,25 +22,25 @@ static const glm::vec3 cubeVerts_positions[] = {
 	{-1, +1, -1},
 	{-1, +1, +1},
 	// +X
-	{+1, -1, -1},
 	{+1, -1, +1},
-	{+1, +1, -1},
+	{+1, -1, -1},
 	{+1, +1, +1},
+	{+1, +1, -1},
 	// -Y
 	{-1, -1, -1},
-	{-1, -1, +1},
 	{+1, -1, -1},
+	{-1, -1, +1},
 	{+1, -1, +1},
 	// +Y
-	{-1, +1, -1},
 	{-1, +1, +1},
-	{+1, +1, -1},
 	{+1, +1, +1},
-	// -Z
-	{-1, -1, -1},
-	{+1, -1, -1},
 	{-1, +1, -1},
 	{+1, +1, -1},
+	// -Z
+	{+1, -1, -1},
+	{-1, -1, -1},
+	{+1, +1, -1},
+	{-1, +1, -1},
 	// +Z
 	{-1, -1, +1},
 	{+1, -1, +1},
@@ -80,30 +81,30 @@ static const glm::vec3 cubeVerts_normals[] = {
 };
 static const glm::vec4 cubeVerts_colors[] = {
 	// -X
-	{0.5f, 0, 0, 1},
-	{0.5f, 0, 0, 1},
-	{0.5f, 0, 0, 1},
-	{0.5f, 0, 0, 1},
+	{0.3f, 0, 0, 1},
+	{0.3f, 0, 0, 1},
+	{0.3f, 0, 0, 1},
+	{0.3f, 0, 0, 1},
 	// +X
 	{1.f, 0, 0, 1},
 	{1.f, 0, 0, 1},
 	{1.f, 0, 0, 1},
 	{1.f, 0, 0, 1},
 	// -Y
-	{0, 0.5f, 0, 1},
-	{0, 0.5f, 0, 1},
-	{0, 0.5f, 0, 1},
-	{0, 0.5f, 0, 1},
+	{0, 0.3f, 0, 1},
+	{0, 0.3f, 0, 1},
+	{0, 0.3f, 0, 1},
+	{0, 0.3f, 0, 1},
 	// +Y
 	{0, 1.f, 0, 1},
 	{0, 1.f, 0, 1},
 	{0, 1.f, 0, 1},
 	{0, 1.f, 0, 1},
 	// -Z
-	{0, 0, 0.5f, 1},
-	{0, 0, 0.5f, 1},
-	{0, 0, 0.5f, 1},
-	{0, 0, 0.5f, 1},
+	{0, 0, 0.3f, 1},
+	{0, 0, 0.3f, 1},
+	{0, 0, 0.3f, 1},
+	{0, 0, 0.3f, 1},
 	// +Z
 	{0, 0, 1.f, 1},
 	{0, 0, 1.f, 1},
@@ -196,10 +197,14 @@ int main()
 		.numInds = std::size(cubeInds)
 	});
 
-	auto cubeMaterial = pbrMgr.createMaterial({});
+	auto cubeMaterial = pbrMgr.createMaterial({.doubleSided = false});
 	auto cubeMesh = tg::makeMesh({ .geom = cubeGeom, .material = cubeMaterial });
-	auto cubeObject = RW.createObject(cubeMesh);
-	cubeObject.setModelMatrix(glm::mat4(1));
+	glm::mat4 instanceMatrices[] = {
+		glm::translate(glm::vec3(-2, 0, 0)),
+		glm::translate(glm::vec3(+2, 0, 0)),
+	};
+	auto cubeObject = RW.createObjectWithInstancing(cubeMesh, instanceMatrices);
+	//cubeObject.setModelMatrix(glm::mat4(1));
 
 	glm::dvec2 prevMousePos;
 	glfwGetCursorPos(glfwWindow, &prevMousePos.x, &prevMousePos.y);
@@ -212,6 +217,12 @@ int main()
 		}
 	});
 
+	glfwSetFramebufferSizeCallback(glfwWindow, [](GLFWwindow* w, int screenW, int screenH) {
+		tg::onWindowResized(screenW, screenH);
+	});
+
+	float dtAverage = 0;
+
 	while (!glfwWindowShouldClose(glfwWindow))
 	{
 		glfwPollEvents();
@@ -219,6 +230,10 @@ int main()
 		const float time = glfwGetTime();
 		const float dt = time - prevTime;
 		prevTime = time;
+		dtAverage = glm::mix(dtAverage, dt, 0.1f);
+		char windowTitle[32];
+		snprintf(windowTitle, sizeof(windowTitle), "tuki editor (%.1f fps)", 1.f / dtAverage);
+		glfwSetWindowTitle(glfwWindow, windowTitle);
 
 		glfwGetFramebufferSize(glfwWindow, &screenW, &screenH);
 		const float aspectRatio = float(screenW) / float(screenH);
