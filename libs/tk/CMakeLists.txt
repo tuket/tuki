@@ -18,6 +18,7 @@ set(SRCS_TOP
 	src/tvk.hpp src/tvk.cpp
 	src/tg.hpp src/tg.cpp
 	src/pbr.hpp src/pbr.cpp
+	src/tk.hpp src/tk.cpp
 )
 set(SRCS
 

@@ -37,9 +37,11 @@ enum class HasVertexNormalsOrTangents { no, normals, normalsAndTangents, };
 
 struct ImageInfo {
     vk::Format format = vk::Format::undefined;
-    u32 w = 0, h = 1, depth = 0; // TODO: maybe use u16?
+    u16 w = 0, h = 1, depth = 1; // TODO: maybe use u16?
     u8 numMips = 1;
     ImageType type = ImageType::_2d;
+
+    u16 getNumLayers() const { return type == ImageType::_3d ? u16(1) : depth; }
     // TODO: we are assuming that the image is just for sampling in the fragment shader, we should have options for other use cases
 };
 
@@ -103,7 +105,7 @@ typedef RefCounted<ImageId> ImageRC;
 u8 calcNumMipsFromDimensions(u32 w, u32 h);
 bool nextMipLevelDown(u32& w, u32& h); // return true when reached the 1x1 level
 ImageRC makeImage(const ImageInfo& info, CSpan<u8> data = {}, bool generateRemainingMips = true);
-ImageRC getOrLoadImage(Path path, bool srgb);
+ImageRC getOrLoadImage(Path path, bool srgb, bool generateMipChain = true);
 
 // IMAGE VIEWS
 struct ImageViewId : IdU32 {
@@ -217,7 +219,7 @@ struct PbrMaterialInfo {
     ImageViewRC albedoImageView = ImageViewRC(ImageViewId{});
     ImageViewRC normalImageView = ImageViewRC(ImageViewId{});
     ImageViewRC metallicRoughnessImageView = ImageViewRC(ImageViewId{});
-    bool doubleSided = true;
+    bool doubleSided = false;
 };
 
 struct PbrMaterialId : MaterialId {
@@ -307,6 +309,8 @@ struct ObjectId : IdU32 {
 struct RenderWorldId : IdU32 {
     ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1));
     ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices);
+    ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances);
+    void destroyObject(ObjectId oid);
 };
 struct RenderWorld {
     struct ObjectMatrices {
@@ -334,6 +338,7 @@ struct RenderWorld {
 
     ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1));
     ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices);
+    ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances);
     void destroyObject(ObjectId oid);
     void _defragmentObjects();
 };
@@ -342,7 +347,6 @@ void destroyRenderWorld(RenderWorldId id);
 
 // draw
 struct RenderWorldViewport { RenderWorldId renderWorld; glm::mat4 viewMtx; glm::mat4 projMtx; vk::Viewport viewport; vk::Rect2d scissor; };
-void startFrame();
 void draw(CSpan<RenderWorldViewport> viewports);
 
 }
