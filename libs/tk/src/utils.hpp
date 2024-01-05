@@ -6,7 +6,10 @@
 #include <type_traits>
 #include <string>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/quaternion.hpp>
 #include <filesystem>
+#include <utility>
 
 namespace tk
 {
@@ -77,6 +80,13 @@ struct PerspectiveCamera {
 
     glm::mat4 projMtx_vk(float aspectRatio)const;
 };
+
+inline glm::mat4 buildMtx(const glm::vec3& position, const glm::quat& rotation, const glm::vec3& scale) {
+    glm::mat4 m = glm::toMat4(rotation);
+    m[3] = glm::vec4(position, 1);
+    m = glm::scale(m, scale);
+    return m;
+}
 
 template <typename T>
 std::span<u8> asBytesSpan(std::span<T> v) { return { (u8*)v.data(), v.size_bytes() }; }

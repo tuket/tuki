@@ -411,7 +411,7 @@ struct ImageUsage { // (VkImageUsageFlagBits)
 	bool output_attachment : 1 = false;
 	bool transient : 1 = false;
 
-	static constexpr ImageUsage default_texture() { return { .transfer_dst = true, .sampled = true, }; }
+	static constexpr ImageUsage default_texture() { return { .transfer_src = true, .transfer_dst = true, .sampled = true, }; }
 	static constexpr ImageUsage default_framebuffer(bool input_attachment, bool sampled) { return { .sampled = sampled, .input_attachment = input_attachment, .output_attachment = true }; }
 };
 struct ImageInfo {
@@ -513,7 +513,7 @@ struct ImageBarrier {
 	u32 srcQueueFamily = 0;
 	u32 dstQueueFamily = 0;
 	VkImage image = VK_NULL_HANDLE;
-	ImageSubresourceRange subresourceRange;
+	ImageSubresourceRange subresourceRange = {};
 };
 struct PipelineBarrier {
 	PipelineStages srcStages = PipelineStages::none;
@@ -546,7 +546,9 @@ struct CmdBuffer {
 	void cmd_copy(VkBuffer src, VkBuffer dst, size_t srcOffset, size_t dstOffset, size_t size);
 
 	void cmd_copy(VkBuffer src, VkImage dst, CSpan<VkBufferImageCopy> regions);
-	void cmd_copy(VkBuffer src, Image dst, const Device& device, size_t bufferOffset = 0, u32 mipLevel = 0);
+	void cmd_copy(Buffer src, Image dst, const Device& device, size_t bufferOffset = 0, u32 mipLevel = 0);
+
+	void cmd_blitToNextMip(const Device& device, Image img, u32 srcMip);
 
 	void cmd_beginRenderPass(const RenderPassBegin& beg);
 	void cmd_endRenderPass();
@@ -989,7 +991,7 @@ struct Device
 
 	Buffer createBuffer(BufferUsage usage, size_t size, BufferHostAccess hostAccess);
 	void destroyBuffer(Buffer buffer);
-	VkBuffer getVkHandle(Buffer buffer) { assert(buffer.id); return buffers[buffer.id - 1].handle; }
+	VkBuffer getVkHandle(Buffer buffer)const { assert(buffer.id); return buffers[buffer.id - 1].handle; }
 
 	u8* getBufferMemPtr(Buffer buffer);
 	size_t getBufferSize(Buffer buffer)const;

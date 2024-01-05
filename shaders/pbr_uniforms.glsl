@@ -24,8 +24,8 @@ layout(set = DESCSET_MATERIAL, binding = 0) uniform MaterialUniforms {
     float u_roughnessFactor;
 };
 
-#if HAS_COLOR_TEX
-    layout(set = DESCSET_MATERIAL, binding = 1) uniform sampler2D u_colorTex;
+#if HAS_ALBEDO_TEX
+    layout(set = DESCSET_MATERIAL, binding = 1) uniform sampler2D u_albedoTex;
 #endif
 #if HAS_NORMAL_TEX
     layout(set = DESCSET_MATERIAL, binding = 2) uniform sampler2D u_normalTex;

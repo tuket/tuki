@@ -363,7 +363,7 @@ Image Device::createImage(const ImageInfo& info)
 	};
 	VkImage image;
 	const VmaAllocationCreateInfo allocCreateInfo = {
-	.usage = VMA_MEMORY_USAGE_AUTO,
+		.usage = VMA_MEMORY_USAGE_AUTO,
 	};
 	VmaAllocation alloc;
 	VmaAllocationInfo allocInfo;
@@ -1389,7 +1389,7 @@ void CmdBuffer::cmd_copy(VkBuffer src, VkImage dst, CSpan<VkBufferImageCopy> reg
 	vkCmdCopyBufferToImage(handle, src, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, u32(regions.size()), regions.data());
 }
 
-void CmdBuffer::cmd_copy(VkBuffer src, Image dst, const Device& device, size_t bufferOffset, u32 mipLevel)
+void CmdBuffer::cmd_copy(Buffer src, Image dst, const Device& device, size_t bufferOffset, u32 mipLevel)
 {
 	const VkImage dstVk = device.getVkHandle(dst);
 	const ImageInfo imgInfo = device.getInfo(dst);
@@ -1406,7 +1406,40 @@ void CmdBuffer::cmd_copy(VkBuffer src, Image dst, const Device& device, size_t b
 		.imageOffset = {0,0,0},
 		.imageExtent = {imgInfo.size.width, imgInfo.size.height, imgInfo.size.depth},
 	} };
-	cmd_copy(src, dstVk, regions);
+	cmd_copy(device.getVkHandle(src), dstVk, regions);
+}
+
+void CmdBuffer::cmd_blitToNextMip(const Device& device, Image img, u32 srcMip)
+{
+	const auto& imgInfo = device.getInfo(img);
+	const auto& imgSize = imgInfo.size;
+	const u32 numLayers = imgInfo.getNumLayers();
+	const u32 dstMip = srcMip + 1;
+	auto calcMipSize = [](u32 size, u32 downLevels)->u16 { return glm::max(u32(1), size >> downLevels); };
+	const VkImageBlit blit = {
+		.srcSubresource = {
+			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.mipLevel = srcMip,
+			.baseArrayLayer = 0,
+			.layerCount = numLayers,
+		},
+		.srcOffsets = {
+			{0,0,0},
+			{calcMipSize(imgSize.width, srcMip), calcMipSize(imgSize.height, srcMip), calcMipSize(imgSize.depth, srcMip)},
+		},
+		.dstSubresource = {
+			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.mipLevel = dstMip,
+			.baseArrayLayer = 0,
+			.layerCount = numLayers,
+		},
+		.dstOffsets = {
+			{0,0,0},
+			{calcMipSize(imgSize.width, dstMip), calcMipSize(imgSize.height, dstMip), calcMipSize(imgSize.depth, dstMip)},
+		},
+	};
+	const VkImage imgVk = device.getVkHandle(img);
+	vkCmdBlitImage(handle, imgVk, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, imgVk, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
 }
 
 void CmdBuffer::cmd_endRenderPass()

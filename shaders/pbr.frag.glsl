@@ -33,8 +33,8 @@ void main()
     #if HAS_VERTCOLOR_0
         albedo *= v_color_0;
     #endif
-    #if HAS_TEXCOORD_0 && HAS_COLOR_TEX
-        albedo *= texture(u_colorTex, v_texCoord_0);
+    #if HAS_TEXCOORD_0 && HAS_ALBEDO_TEX
+        albedo *= texture(u_albedoTex, v_texCoord_0);
     #endif
 
     #if HAS_NORMAL

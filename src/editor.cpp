@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/transform.hpp>
+#include <tk.hpp>
 
 namespace tvk = tk::vk;
 using tk::CSpan;
@@ -112,6 +113,15 @@ static const glm::vec4 cubeVerts_colors[] = {
 	{0, 0, 1.f, 1},
 };
 
+static const glm::vec2 cubeVerts_texCoords[] = {
+	{0, 0}, {1, 0}, {0, 1}, {1, 1},
+	{0, 0}, {1, 0}, {0, 1}, {1, 1},
+	{0, 0}, {1, 0}, {0, 1}, {1, 1},
+	{0, 0}, {1, 0}, {0, 1}, {1, 1},
+	{0, 0}, {1, 0}, {0, 1}, {1, 1},
+	{0, 0}, {1, 0}, {0, 1}, {1, 1},
+};
+
 static void completeCubeInds()
 {
 	for (u32 d = 1; d < 3; d++) {
@@ -163,7 +173,7 @@ int main()
 	completeCubeInds();
 	printf("tuki editor!\n");
 	glfwInit();
-	defer(glfwTerminate);
+	defer(glfwTerminate());
 	
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // don't create OpenGL context
 	int screenW = 800, screenH = 600;
@@ -180,12 +190,17 @@ int main()
 
 	tg::initRenderUniverse({ .instance = instance, .surface = surface, .screenW = u32(screenW), .screenH = u32(screenH) });
 
-	tg::PbrMaterialManager pbrMgr = {};
-	pbrMgr.init();
-	tg::registerMaterialManager(pbrMgr.getRegisterCallbacks());
+	//tg::PbrMaterialManager pbrMgr = {};
+	//pbrMgr.init();
+	//tg::registerMaterialManager(pbrMgr.getRegisterCallbacks());
 
-	auto RW = tg::createRenderWorld();
-	defer(tg::destroyRenderWorld(RW));
+	auto mainWorld = tk::createWorld();
+	//defer(tk::destroyWorld());
+
+	auto systems = mainWorld->createDefaultBasicSystems();
+	auto& pbrMgr = systems.system_render.pbrMaterialManager;
+	auto& RW = systems.system_render.RW;
+	auto& factory_renderable3d = systems.system_render.factory_renderable3d;
 
 	CSpan<u8> cubeGeomData[] = { tk::asBytesSpan(cubeInds), tk::asBytesSpan(cubeVerts_positions), tk::asBytesSpan(cubeVerts_normals), tk::asBytesSpan(cubeVerts_colors) };
 	auto cubeGeom = tg::createGeom({
@@ -199,12 +214,32 @@ int main()
 
 	auto cubeMaterial = pbrMgr.createMaterial({.doubleSided = false});
 	auto cubeMesh = tg::makeMesh({ .geom = cubeGeom, .material = cubeMaterial });
-	glm::mat4 instanceMatrices[] = {
-		glm::translate(glm::vec3(-2, 0, 0)),
-		glm::translate(glm::vec3(+2, 0, 0)),
-	};
-	auto cubeObject = RW.createObjectWithInstancing(cubeMesh, instanceMatrices);
+	//const glm::mat4 cubeInstanceMatrices[] = {
+	//	glm::translate(glm::vec3(-2, 0, 0)),
+	//	glm::translate(glm::vec3(+2, 0, 0)),
+	//};
+	//auto cubeObject = RW.createObjectWithInstancing(cubeMesh, cubeInstanceMatrices);
 	//cubeObject.setModelMatrix(glm::mat4(1));
+	factory_renderable3d->create({.position = glm::vec3(0), .separateMaterial = false, .mesh = cubeMesh, });
+	factory_renderable3d->create({.position = glm::vec3(1, 0, 0), .separateMaterial = false, .mesh = cubeMesh, });
+
+	/*auto crateGeom = tg::createGeom({
+		.positions = tk::asBytesSpan(cubeVerts_positions),
+		.normals = tk::asBytesSpan(cubeVerts_normals),
+		.texCoords = tk::asBytesSpan(cubeVerts_texCoords),
+		.indices = tk::asBytesSpan(cubeInds),
+		.numVerts = std::size(cubeVerts_positions),
+		.numInds = std::size(cubeInds)
+	});
+	auto crateImg = tg::getOrLoadImage("data/crate.png", true);
+	auto crateImgView = tg::makeImageView({ .image = crateImg });
+	auto crateMaterial = pbrMgr.createMaterial({ .albedoImageView = crateImgView });
+	auto crateMesh = tg::makeMesh({ .geom = crateGeom, .material = crateMaterial });
+	const glm::mat4 crateInstanceMatrices[] = {
+		glm::translate(glm::vec3(0, 0, -2)),
+		glm::translate(glm::vec3(0, 0, +2)),
+	};
+	auto crateObject = RW.createObjectWithInstancing(crateMesh, crateInstanceMatrices);*/
 
 	glm::dvec2 prevMousePos;
 	glfwGetCursorPos(glfwWindow, &prevMousePos.x, &prevMousePos.y);
@@ -275,6 +310,7 @@ int main()
 				.scissor = {0,0, u32(screenW), u32(screenH)}
 			}
 		};
+		systems.update(dt);
 		tg::draw(viewports);
 	}
 

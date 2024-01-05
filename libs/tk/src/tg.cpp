@@ -15,6 +15,14 @@ static constexpr u32 STAGING_BUFFER_CAPACITY = 32u << 20u;
 static const u32 MAX_DIR_LIGHTS = 4;
 static const auto MAX_DIR_LIGHTS_STR = std::format("{}", MAX_DIR_LIGHTS);
 
+struct ImageStagingProc {
+	ImageId img;
+	vk::Buffer stagingBuffer;
+	u32 stagingBufferOffset;
+	u32 dataSize : 31;
+	bool generateMipChain : 1;
+};
+
 struct RenderUniverse
 {
 	u32 queueFamily;
@@ -53,6 +61,7 @@ struct RenderUniverse
 	std::vector<u32> images_defaultImageView;
 	std::unordered_map<Path, ImageId> images_nameToId;
 	u32 images_nextFreeEntry = u32(-1);
+	std::vector<ImageStagingProc> images_stagingProcs;
 
 	// image views
 	std::vector<vk::ImageView> imageViews_vk;
@@ -93,14 +102,24 @@ struct RenderUniverse
 
 static RenderUniverse RU;
 
-static void stageData(vk::Buffer buffer, CSpan<CSpan<u8>> data, size_t dstOffset = 0)
+struct PreparedStagingData {
+	vk::Buffer buffer;
+	u32 offset;
+	u32 dataSize;
+};
+
+static vk::CmdBuffer& getCurrentStagingCmdBuffer()
+{
+	return RU.cmdBuffers_staging[RU.cmdBuffers_staging_ind];
+}
+
+static PreparedStagingData prepareStagingData(CSpan<CSpan<u8>> data)
 {
 	size_t totalSize = 0;
 	for (auto d : data)
 		totalSize += d.size();
-	assert(data.size() < STAGING_BUFFER_CAPACITY);
+	assert(totalSize <= STAGING_BUFFER_CAPACITY);
 
-	auto& cmdBuffer = RU.cmdBuffers_staging[RU.cmdBuffers_staging_ind];
 	int i;
 	for (i = int(RU.spareStagingBuffers.size()) - 1; i >= 0; i--) {
 		const u32 remainingSpace = STAGING_BUFFER_CAPACITY - RU.spareStagingBuffers[i].offset;
@@ -110,7 +129,7 @@ static void stageData(vk::Buffer buffer, CSpan<CSpan<u8>> data, size_t dstOffset
 	if (i == -1) { // no spareStagingBuffer found, need to create one
 		i = RU.spareStagingBuffers.size();
 		const vk::Buffer stagingBuffer = RU.device.createBuffer(vk::BufferUsage::transferSrc, STAGING_BUFFER_CAPACITY, { .sequentialWrite = true });
-		RU.spareStagingBuffers.push_back(RenderUniverse::StagingBuffer {
+		RU.spareStagingBuffers.push_back(RenderUniverse::StagingBuffer{
 			.buffer = stagingBuffer,
 			.offset = 0,
 		});
@@ -121,14 +140,47 @@ static void stageData(vk::Buffer buffer, CSpan<CSpan<u8>> data, size_t dstOffset
 		memcpy(memPtr, d.data(), d.size());
 		memPtr += d.size();
 	}
-	cmdBuffer.cmd_copy(RU.device.getVkHandle(sb.buffer), RU.device.getVkHandle(buffer), sb.offset, dstOffset, totalSize);
+
+	const size_t offset = sb.offset;
 	sb.offset += totalSize;
+
+	return { sb.buffer, u32(offset), u32(totalSize) };
+}
+
+static void stageData(vk::Buffer buffer, CSpan<CSpan<u8>> data, size_t dstOffset = 0)
+{
+	auto [srcBuffer, srcBufferOffset, dataSize] = prepareStagingData(data);
+	auto& cmdBuffer = getCurrentStagingCmdBuffer();
+	cmdBuffer.cmd_copy(RU.device.getVkHandle(srcBuffer), RU.device.getVkHandle(buffer), srcBufferOffset, dstOffset, dataSize);
 }
 
 static void stageData(vk::Buffer buffer, CSpan<u8> data, size_t dstOffset = 0)
 {
 	const CSpan<u8> datas[] = { data };
 	stageData(buffer, datas, dstOffset);
+}
+
+static void stageDataToImage(vk::Image img, CSpan<u8> data)
+{
+	const CSpan<u8> datas[] = { data };
+	auto [srcBuffer, srcBufferOffset, dataSize] = prepareStagingData(datas);
+
+	const auto& imgInfo = RU.device.getInfo(img);
+
+	auto& cmdBuffer = getCurrentStagingCmdBuffer();
+	const VkBufferImageCopy copy{
+		.bufferOffset = srcBufferOffset,
+		.bufferRowLength = 0, .bufferImageHeight = 0, // when either of these values is 0, the buffer memory is assumed to be tightly packed according to the imageExtent
+		.imageSubresource = {
+			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.mipLevel = 0,
+			.baseArrayLayer = 0,
+			.layerCount = imgInfo.getNumLayers(),
+		},
+		.imageOffset = {0, 0, 0},
+		.imageExtent = {imgInfo.size.width, imgInfo.size.height, imgInfo.size.depth},
+	};
+	cmdBuffer.cmd_copy(RU.device.getVkHandle(srcBuffer), RU.device.getVkHandle(img), { &copy, 1 });
 }
 
 // --- IMAGES ---
@@ -196,7 +248,7 @@ bool nextMipLevelDown(u32& w, u32& h)
 	return w == u32(1) && h == u32(1);
 }
 
-ImageRC getOrLoadImage(Path path, bool srgb)
+ImageRC getOrLoadImage(Path path, bool srgb, bool generateMipChain)
 {
 	auto it = RU.images_nameToId.find(path);
 	if (it != RU.images_nameToId.end())
@@ -208,30 +260,42 @@ ImageRC getOrLoadImage(Path path, bool srgb)
 		return ImageRC(ImageId{});
 
 	assert(w > 0 && h > 0 && imgData != nullptr);
+	const u8 numMips = calcNumMipsFromDimensions(u32(w), u32(h));
 	const auto format = srgb ? vk::Format::RGBA8_SRGB : vk::Format::RGBA8_UNORM;
 	vk::Image imageVk = RU.device.createImage({
-		.size = {u16(w), u16(h)},
+		.size = {
+			.width = u16(w),
+			.height = u16(h),
+			.numMips = numMips,
+		},
 		.format = format,
 		.dimensions = 2,
 		.numSamples = 1,
 		.usage = vk::ImageUsage::default_texture(),
 		.layout = vk::ImageLayout::undefined,
 	});
-	const u8 numMips = calcNumMipsFromDimensions(u32(w), u32(h));
 
 	const u32 e = acquireImageEntry();
 	RU.images_info[e] = ImageInfo {
 		.format = format,
-		.w = u32(w), .h = u32(h),
+		.w = u16(w), .h = u16(h),
 		.numMips = numMips,
 	};
+	RU.images_vk[e] = imageVk;
+	RU.images_refCount[e] = 0;
+	ImageId imgId{ e };
 
-	// TODO:
-	// - staging
-	// - generate mip chain
-	// - layout transition
+	CSpan<u8> datas[] = { { imgData, size_t(w * h * 4) } };
+	auto [stagingBuffer, stagingBufferOffset, dataSize] = prepareStagingData(datas);
+	RU.images_stagingProcs.push_back(ImageStagingProc{
+		.img = imgId,
+		.stagingBuffer = stagingBuffer,
+		.stagingBufferOffset = u32(stagingBufferOffset),
+		.dataSize = dataSize,
+		.generateMipChain = generateMipChain
+	});
 
-	return ImageRC{}; // TODO!
+	return ImageRC{imgId};
 }
 
 // --- IMAGE VIEWS ---
@@ -257,7 +321,7 @@ static u32 acquireImageViewEntry()
 	}
 
 	// there wasn't a free entry; need to create one
-	const u32 e = RU.geoms_buffer.size();
+	const u32 e = RU.imageViews_vk.size();
 	RU.imageViews_vk.emplace_back();
 	RU.imageViews_refCount.emplace_back();
 	RU.imageViews_image.emplace_back();
@@ -867,11 +931,19 @@ void ObjectId::setModelMatrix(const glm::mat4& m, u32 instanceInd)
 	RW.modelMatrices[RW.objects_firstModelMtx[id] + instanceInd] = m;
 }
 
+void ObjectId::setModelMatrices(CSpan<glm::mat4> matrices, u32 firstInstanceInd)
+{
+	auto& RW = RU.renderWorlds[_renderWorld.id];
+	assert(firstInstanceInd + matrices.size() <= RW.objects_info[id].numInstances);
+	for (size_t i = 0; i < matrices.size(); i++)
+		RW.modelMatrices[RW.objects_firstModelMtx[id] + firstInstanceInd + i] = matrices[i];
+}
+
 static void begingStagingCmdRecordingForNextFrame()
 {
 	// begin staging cmd recording for the next frame
 	RU.cmdBuffers_staging_ind = (RU.cmdBuffers_staging_ind + 1) % (RU.swapchain.numImages + 1);
-	RU.cmdBuffers_staging[RU.cmdBuffers_staging_ind].begin(vk::CmdBufferUsageFlags{ .oneTimeSubmit = true });
+	getCurrentStagingCmdBuffer().begin(vk::CmdBufferUsageFlags{ .oneTimeSubmit = true });
 }
 
 // *** INIT RENDER UNIVERSE ***
@@ -1077,6 +1149,14 @@ ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4>
 {
 	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), instancesMatrices);
 }
+ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, u32 numInstances)
+{
+	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), numInstances);
+}
+void RenderWorldId::destroyObject(ObjectId oid)
+{
+	RU.renderWorlds[id].destroyObject(oid);
+}
 ObjectId RenderWorld::createObject(MeshRC mesh, const glm::mat4& modelMtx)
 {
 	const u32 e = acquireObjectEntry(*this);
@@ -1094,6 +1174,15 @@ ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> i
 	for (auto& m : instancesMatrices)
 		modelMatrices.push_back(m);
 	return ObjectId(id, {e});
+}
+
+ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, u32 numInstances)
+{
+	const u32 e = acquireObjectEntry(*this);
+	objects_info[e] = { mesh, numInstances };
+	objects_firstModelMtx[e] = u32(modelMatrices.size());
+	modelMatrices.resize(modelMatrices.size() + size_t(numInstances));
+	return ObjectId(id, { e });
 }
 
 void RenderWorld::destroyObject(ObjectId oid)
@@ -1117,8 +1206,7 @@ void RenderWorld::_defragmentObjects()
 			break;
 	}
 
-	u32 objJ = objI;
-	for (; objJ < numObjs; objJ++) {
+	for (u32 objJ = objI + 1; objJ < numObjs; objJ++) {
 		auto& info = objects_info[objJ];
 		if (info.mesh.id.isValid()) {
 			const u32 firstModelMtx = objects_firstModelMtx[objJ];
@@ -1136,6 +1224,7 @@ void RenderWorld::_defragmentObjects()
 	objects_info.resize(objI);
 	objects_firstModelMtx.resize(objI);
 	modelMatrices.resize(mtxI);
+	needDefragmentObjects = false;
 }
 
 // *** DRAW ***
@@ -1266,9 +1355,6 @@ void draw(CSpan<RenderWorldViewport> viewports)
 		}
 		RU.oldScreenW = RU.screenW;
 		RU.oldScreenH = RU.screenH;
-
-		//RU.cmdBuffers_staging[RU.cmdBuffers_staging_ind].end();
-		//begingStagingCmdRecordingForNextFrame();
 	}
 
 	RU.swapchain.acquireNextImage(RU.device);
@@ -1317,10 +1403,11 @@ void draw(CSpan<RenderWorldViewport> viewports)
 			RU.device.flushBuffer(sb.buffer);
 	}
 
-	auto& cmdBuffer_staging = RU.cmdBuffers_staging[RU.cmdBuffers_staging_ind];
+	auto& cmdBuffer_staging = getCurrentStagingCmdBuffer();
 	auto& cmdBuffer_draw = RU.cmdBuffers_draw[scImgInd];
 	cmdBuffer_draw.begin(vk::CmdBufferUsageFlags{ .oneTimeSubmit = true });
 
+	// staging to buffers
 	const vk::MemoryBarrier stagingMemoryBarriers[] = { {
 		.srcAccess = vk::AccessFlags::transferWrite,
 		.dstAccess = vk::AccessFlags::vertexAttributeRead | vk::AccessFlags::indexRead | vk::AccessFlags::shaderRead,
@@ -1333,6 +1420,134 @@ void draw(CSpan<RenderWorldViewport> viewports)
 		.bufferBarriers = {},
 		.imageBarriers = {}, // TODO
 	});
+
+	// staging to images
+	if (const size_t N = RU.images_stagingProcs.size(); N != 0) {
+		// - images to transferDst layout
+		std::vector<vk::Image> images(N);
+		for (size_t i = 0; i < N; i++) {
+			const auto& proc = RU.images_stagingProcs[i];
+			images[i] = proc.img.getHandle();
+		}
+		cmdBuffer_staging.cmd_pipelineBarrier_imagesToTransferDstLayout(RU.device, images);
+
+		// copy data to images
+		for (size_t i = 0; i < N; i++) {
+			const auto& proc = RU.images_stagingProcs[i];
+			cmdBuffer_staging.cmd_copy(proc.stagingBuffer, proc.img.getHandle(), RU.device, proc.stagingBufferOffset);
+		}
+
+		u8 maxLevels = 1;
+		u32 numGenerateMipChains = 0;
+		for (const auto& proc : RU.images_stagingProcs) {
+			if (proc.generateMipChain) {
+				maxLevels = glm::max(proc.img.getInfo().numMips, maxLevels);
+				numGenerateMipChains++;
+			}
+		}
+
+		// generate the mipchain with blit operations (and the necessary layout transitions)
+		// in order to minimize the number of barriers, we place one shared(among different images) barrier per lvl. This should also allow the blit of separate images to run in parallel
+		std::vector<vk::ImageBarrier> imgBarriers;
+		imgBarriers.reserve(numGenerateMipChains);
+		for (u8 invLevel = maxLevels-1; invLevel; invLevel--) {
+			// transition to transferRead layout
+			imgBarriers.resize(0);
+			for (size_t i = 0; i < RU.images_stagingProcs.size(); i++) {
+				const auto& proc = RU.images_stagingProcs[i];
+				const auto& imgInfo = proc.img.getInfo();
+				const u8 numMips = imgInfo.numMips;
+				if (proc.generateMipChain && invLevel <= numMips) {
+					const u8 lvl = numMips - invLevel - 1;
+					const vk::Image imgVk = proc.img.getHandle();
+
+					imgBarriers.push_back(vk::ImageBarrier{
+						.srcAccess = vk::AccessFlags::transferWrite,
+						.dstAccess = vk::AccessFlags::transferRead,
+						.srcLayout = vk::ImageLayout::transferDst,
+						.dstLayout = vk::ImageLayout::transferSrc,
+						.image = RU.device.getVkHandle(imgVk),
+						.subresourceRange = {
+							.baseMip = lvl,
+							.numLayers = imgInfo.getNumLayers(),
+						},
+					});
+				}
+			}
+			const vk::PipelineBarrier pipelineBarrier = {
+				.srcStages = vk::PipelineStages::transfer,
+				.dstStages = vk::PipelineStages::transfer,
+				.imageBarriers = imgBarriers
+			};
+			cmdBuffer_staging.cmd_pipelineBarrier(pipelineBarrier);
+
+			// blit!
+			for (size_t i = 0; i < RU.images_stagingProcs.size(); i++) {
+				const auto& proc = RU.images_stagingProcs[i];
+				const auto& imgInfo = proc.img.getInfo();
+				const u8 numMips = imgInfo.numMips;
+				if (proc.generateMipChain && invLevel <= numMips) {
+					const u8 lvl = numMips - invLevel - 1;
+					const vk::Image imgVk = proc.img.getHandle();
+
+					cmdBuffer_staging.cmd_blitToNextMip(RU.device, imgVk, lvl);
+				}
+			}
+		}
+
+		// transtion to shaderRead layout
+		imgBarriers.resize(0);
+		for (size_t i = 0; i < RU.images_stagingProcs.size(); i++) {
+			const auto& proc = RU.images_stagingProcs[i];
+			if (proc.generateMipChain) {
+				const auto& imgInfo = proc.img.getInfo();
+				const u8 numMips = imgInfo.numMips;
+				const vk::Image imgVk = proc.img.getHandle();
+
+				// most levels are in the transferSrc layout...
+				if (numMips > 1) {
+					imgBarriers.push_back(vk::ImageBarrier{
+						.srcAccess = vk::AccessFlags::transferRead,
+						.dstAccess = vk::AccessFlags::shaderRead,
+						.srcLayout = vk::ImageLayout::transferSrc,
+						.dstLayout = vk::ImageLayout::shaderReadOnly,
+						.image = RU.device.getVkHandle(imgVk),
+						.subresourceRange = {
+							.baseMip = 0,
+							.numMips = numMips - 1u,
+							.numLayers = imgInfo.getNumLayers(),
+						},
+					});
+				}
+
+				// ...but the smallest one is in the transferDst layout
+				imgBarriers.push_back(vk::ImageBarrier{
+					.srcAccess = vk::AccessFlags::transferWrite,
+					.dstAccess = vk::AccessFlags::shaderRead,
+					.srcLayout = vk::ImageLayout::transferDst,
+					.dstLayout = vk::ImageLayout::shaderReadOnly,
+					.image = RU.device.getVkHandle(imgVk),
+					.subresourceRange = {
+						.baseMip = numMips - 1u,
+						.numMips = 1,
+						.numLayers = imgInfo.getNumLayers(),
+					},
+				});
+			}
+		}
+		if (imgBarriers.size()) {
+			cmdBuffer_staging.cmd_pipelineBarrier({
+				.srcStages = vk::PipelineStages::transfer,
+				.dstStages = vk::PipelineStages::fragmentShader, // assuming that images are just needed in the frament shader
+				.memoryBarriers = {},
+				.bufferBarriers = {},
+				.imageBarriers = imgBarriers,
+			});
+		}
+
+		RU.images_stagingProcs.resize(0);
+	}
+
 	cmdBuffer_staging.end();
 	
 	// begin renderPass
