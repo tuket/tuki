@@ -211,19 +211,10 @@ int main()
 		.numVerts = std::size(cubeVerts_positions),
 		.numInds = std::size(cubeInds)
 	});
-
 	auto cubeMaterial = pbrMgr.createMaterial({.doubleSided = false});
 	auto cubeMesh = tg::makeMesh({ .geom = cubeGeom, .material = cubeMaterial });
-	//const glm::mat4 cubeInstanceMatrices[] = {
-	//	glm::translate(glm::vec3(-2, 0, 0)),
-	//	glm::translate(glm::vec3(+2, 0, 0)),
-	//};
-	//auto cubeObject = RW.createObjectWithInstancing(cubeMesh, cubeInstanceMatrices);
-	//cubeObject.setModelMatrix(glm::mat4(1));
-	factory_renderable3d->create({.position = glm::vec3(0), .separateMaterial = false, .mesh = cubeMesh, });
-	factory_renderable3d->create({.position = glm::vec3(1, 0, 0), .separateMaterial = false, .mesh = cubeMesh, });
 
-	/*auto crateGeom = tg::createGeom({
+	auto crateGeom = tg::createGeom({
 		.positions = tk::asBytesSpan(cubeVerts_positions),
 		.normals = tk::asBytesSpan(cubeVerts_normals),
 		.texCoords = tk::asBytesSpan(cubeVerts_texCoords),
@@ -239,7 +230,19 @@ int main()
 		glm::translate(glm::vec3(0, 0, -2)),
 		glm::translate(glm::vec3(0, 0, +2)),
 	};
-	auto crateObject = RW.createObjectWithInstancing(crateMesh, crateInstanceMatrices);*/
+
+	const int n = 10;
+	for (int iy = 0; iy < n; iy++) {
+		for (int ix = 0; ix < n; ix++) {
+			const bool cubeType = (iy + ix) % 2 == 0;
+			factory_renderable3d->create({
+				.position = glm::vec3(0.6f*(ix - n/2 + 0.5f), 0.6f * (iy - n/2 + 0.5f), 0),
+				.scale = glm::vec3(0.2),
+				.separateMaterial = false,
+				.mesh = cubeType ? cubeMesh : crateMesh,
+			});
+		}
+	}
 
 	glm::dvec2 prevMousePos;
 	glfwGetCursorPos(glfwWindow, &prevMousePos.x, &prevMousePos.y);

@@ -921,22 +921,25 @@ MeshRC makeMesh(MeshInfo&& info)
 ObjectInfo ObjectId::getInfo()const
 {
 	auto& RW = RU.renderWorlds[_renderWorld.id];
-	return RW.objects_info[id];
+	const u32 e = RW.objects_id_to_entry[id];
+	return RW.objects_info[e];
 }
 
 void ObjectId::setModelMatrix(const glm::mat4& m, u32 instanceInd)
 {
 	auto& RW = RU.renderWorlds[_renderWorld.id];
-	assert(instanceInd < RW.objects_info[id].numInstances);
-	RW.modelMatrices[RW.objects_firstModelMtx[id] + instanceInd] = m;
+	const u32 e = RW.objects_id_to_entry[id];
+	assert(instanceInd < RW.objects_info[e].numInstances);
+	RW.modelMatrices[RW.objects_firstModelMtx[e] + instanceInd] = m;
 }
 
 void ObjectId::setModelMatrices(CSpan<glm::mat4> matrices, u32 firstInstanceInd)
 {
 	auto& RW = RU.renderWorlds[_renderWorld.id];
-	assert(firstInstanceInd + matrices.size() <= RW.objects_info[id].numInstances);
+	const u32 e = RW.objects_id_to_entry[id];
+	assert(firstInstanceInd + matrices.size() <= RW.objects_info[e].numInstances);
 	for (size_t i = 0; i < matrices.size(); i++)
-		RW.modelMatrices[RW.objects_firstModelMtx[id] + firstInstanceInd + i] = matrices[i];
+		RW.modelMatrices[RW.objects_firstModelMtx[e] + firstInstanceInd + i] = matrices[i];
 }
 
 static void begingStagingCmdRecordingForNextFrame()
@@ -1076,6 +1079,7 @@ RenderWorldId createRenderWorld()
 	auto& RW = RU.renderWorlds[entry];
 	RW.id = { entry };
 	const u32 numExpectedObjects = 1 << 10;
+	RW.objects_id_to_entry.reserve(numExpectedObjects);
 	RW.objects_info.reserve(numExpectedObjects);
 	RW.objects_firstModelMtx.reserve(numExpectedObjects);
 	RW.modelMatrices.reserve(numExpectedObjects);
@@ -1124,12 +1128,13 @@ static u32 acquireObjectEntry(RenderWorld& RW)
 	if (RW.objects_nextFreeEntry != u32(-1)) {
 		// there was a free entry
 		const u32 e = RW.objects_nextFreeEntry;
-		RW.objects_nextFreeEntry = *(const u32*)&RW.objects_info[e];
+		RW.objects_nextFreeEntry = RW.objects_info[e].numInstances;
 		return e;
 	}
 
 	// there wasn't a free entry; need to create one
 	const u32 e = RW.objects_info.size();
+	RW.objects_entry_to_id.emplace_back();
 	RW.objects_info.emplace_back();
 	RW.objects_firstModelMtx.emplace_back();
 	return e;
@@ -1137,8 +1142,28 @@ static u32 acquireObjectEntry(RenderWorld& RW)
 static void releaseObjectEntry(RenderWorld& RW, u32 e)
 {
 	const u32 e2 = RW.objects_nextFreeEntry;
-	*(u32*)&RW.objects_info[e] = e2;
+	RW.objects_info[e].numInstances = e2;
 	RW.objects_nextFreeEntry = e;
+}
+
+static u32 acquireObjectId(RenderWorld& RW)
+{
+	if (RW.objects_nextFreeId != u32(-1)) {
+		// there was a free id
+		const u32 id = RW.objects_nextFreeId;
+		RW.objects_nextFreeId = RW.objects_id_to_entry[id];
+		return id;
+	}
+
+	const u32 id = RW.objects_id_to_entry.size();
+	RW.objects_id_to_entry.emplace_back();
+	return id;
+}
+
+static void releaseObjectId(RenderWorld& RW, u32 id)
+{
+	RW.objects_id_to_entry[id] = RW.objects_nextFreeId;
+	RW.objects_nextFreeId = id;
 }
 
 ObjectId RenderWorldId::createObject(MeshRC mesh, const glm::mat4& modelMtx)
@@ -1157,37 +1182,49 @@ void RenderWorldId::destroyObject(ObjectId oid)
 {
 	RU.renderWorlds[id].destroyObject(oid);
 }
+
+template<bool PROVIDE_DATA>
+static ObjectId _createObjectWithInstancing(RenderWorld& RW, MeshRC mesh, u32 numInstances, const glm::mat4* instancesMatrices)
+{
+	const u32 e = acquireObjectEntry(RW);
+	const u32 oid = acquireObjectId(RW);
+	RW.objects_entry_to_id[e] = oid;
+	RW.objects_id_to_entry[oid] = e;
+	RW.objects_info[e] = { mesh, numInstances };
+	RW.objects_firstModelMtx[e] = u32(RW.modelMatrices.size());
+	if constexpr (PROVIDE_DATA) {
+		for (u32 i = 0; i < numInstances; i++) {
+			const auto& m = instancesMatrices[i];
+			RW.modelMatrices.push_back(m);
+		}
+	}
+	else {
+		RW.modelMatrices.resize(RW.modelMatrices.size() + size_t(numInstances));
+	}
+	return ObjectId(RW.id, { e });
+}
+
 ObjectId RenderWorld::createObject(MeshRC mesh, const glm::mat4& modelMtx)
 {
-	const u32 e = acquireObjectEntry(*this);
-	objects_info[e] = { mesh, 1 };
-	objects_firstModelMtx[e] = u32(modelMatrices.size());
-	modelMatrices.push_back(modelMtx);
-	return ObjectId(id, {e});
+	return _createObjectWithInstancing<true>(*this, std::move(mesh), 1, &modelMtx);
 }
 
 ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices)
 {
-	const u32 e = acquireObjectEntry(*this);
-	objects_info[e] = { mesh, u32(instancesMatrices.size()) };
-	objects_firstModelMtx[e] = u32(modelMatrices.size());
-	for (auto& m : instancesMatrices)
-		modelMatrices.push_back(m);
-	return ObjectId(id, {e});
+	return _createObjectWithInstancing<true>(*this, std::move(mesh), instancesMatrices.size(), instancesMatrices.data());
 }
 
 ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, u32 numInstances)
 {
-	const u32 e = acquireObjectEntry(*this);
-	objects_info[e] = { mesh, numInstances };
-	objects_firstModelMtx[e] = u32(modelMatrices.size());
-	modelMatrices.resize(modelMatrices.size() + size_t(numInstances));
-	return ObjectId(id, { e });
+	return _createObjectWithInstancing<false>(*this, std::move(mesh), numInstances, nullptr);
 }
 
 void RenderWorld::destroyObject(ObjectId oid)
 {
-	objects_info[oid.id].mesh = MeshRC{};
+	const u32 e = objects_id_to_entry[oid.id];
+	objects_info[e].mesh = MeshRC{};
+	releaseObjectEntry(*this, e);
+	releaseObjectId(*this, oid.id);
 	needDefragmentObjects = true;
 }
 
@@ -1213,16 +1250,20 @@ void RenderWorld::_defragmentObjects()
 			const u32 numInstances = info.numInstances;
 			objects_info[objI] = std::move(info);
 			objects_firstModelMtx[objI] = mtxI;
+			objects_entry_to_id[objI] = objects_entry_to_id[objJ];
+			objects_id_to_entry[objJ] = objI;
 			for (u32 i = 0; i < numInstances; i++) {
 				modelMatrices[mtxI] = modelMatrices[firstModelMtx + i];
 				mtxI++;
 			}
+
 			objI++;
 		}
 	}
 
 	objects_info.resize(objI);
 	objects_firstModelMtx.resize(objI);
+	objects_entry_to_id.resize(objI);
 	modelMatrices.resize(mtxI);
 	needDefragmentObjects = false;
 }

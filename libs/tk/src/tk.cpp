@@ -15,7 +15,7 @@ EntityId EntityFactory_Renderable3d::create(const Create& info)
     u32 e = components_nextFreeEntry;
     if (e == u32(-1)) {
         e = u32(components_position3d.size());
-        indsInWorld.push_back(0);
+        indsInWorld.emplace_back();
         components_position3d.push_back({ info.position });
         components_rotation3d.push_back({ info.rotation });
         components_scale3d.push_back({ info.scale });
@@ -47,18 +47,18 @@ EntityId EntityFactory_Renderable3d::create(const Create& info)
             auto mesh = gfx::makeMesh({ .geom = info.geom, .material = info.material });
             gfxObjects.emplace_back(system_render.RW.createObject(mesh));
             gfxObjectInd = u32(gfxObjects.size() - 1);
-            geomAndMaterial_to_renderableInd[geomAndMaterial] = u32(components_renderableMesh.size());
+            geomAndMaterial_to_renderableInd[geomAndMaterial] = e;
         }
         else {
             addGfxObjectInstance(it->second);
         }
     }
     else {
-        const u32 materialInd = info.mesh.id.id;
-        if (auto it = mesh_to_renderableInd.find(materialInd); it == mesh_to_renderableInd.end()) {
+        const u32 meshInd = info.mesh.id.id;
+        if (auto it = mesh_to_renderableInd.find(meshInd); it == mesh_to_renderableInd.end()) {
             gfxObjectInd = u32(gfxObjects.size());
             gfxObjects.emplace_back(system_render.RW.createObject(info.mesh));
-            mesh_to_renderableInd[materialInd] = u32(components_renderableMesh.size());
+            mesh_to_renderableInd[meshInd] = e;
         }
         else {
             addGfxObjectInstance(it->second);

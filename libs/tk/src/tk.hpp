@@ -165,7 +165,7 @@ struct EntityFactory_Renderable3d : EntityFactory
     struct Create {
         glm::vec3 position = glm::vec3(0);
         glm::quat rotation = glm::quat();
-        glm::vec3 scale = glm::vec3(0);
+        glm::vec3 scale = glm::vec3(1);
         bool separateMaterial = false;
         union {
             struct {

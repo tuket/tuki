@@ -320,11 +320,15 @@ struct RenderWorld {
     };
 
     RenderWorldId id = {};
+    std::vector<u32> objects_id_to_entry;
+    std::vector<u32> objects_entry_to_id;
     std::vector<ObjectInfo> objects_info;
     std::vector<u32> objects_firstModelMtx;
     std::vector<glm::mat4> modelMatrices;
     std::vector<ObjectMatrices> objects_matricesTmp;
     std::vector<u32> objects_accumInstancesTmp;
+    u32 numObjects = 0;
+    u32 objects_nextFreeId = u32(-1);
     u32 objects_nextFreeEntry = u32(-1);
     bool needDefragmentObjects = false;
     std::vector<std::vector<vk::Buffer>> instancingBuffers; // [swapchainImgInd][viewportInd]
