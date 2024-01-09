@@ -36,9 +36,18 @@ EntityId EntityFactory_Renderable3d::create(const Create& info)
         auto gfxObjectInfo = gfxObject.getInfo();
         instanceInd = gfxObjectInfo.numInstances;
         gfxObjectInfo.numInstances++;
-        auto newGfxObject = system_render.RW.createObjectWithInstancing(gfxObjectInfo.mesh, gfxObjectInfo.numInstances);
-        gfxObject = newGfxObject;
-        system_render.RW.destroyObject(oldGfxObject);
+        if (gfxObjectInfo.numInstances > gfxObjectInfo.maxInstances) {
+            const u32 newMaxInstances =
+                gfxObjectInfo.numInstances > 64 ? nextPowerOf2(gfxObjectInfo.numInstances) :
+                gfxObjectInfo.numInstances > 16 ? 64 :
+                gfxObjectInfo.numInstances > 4 ? 16 : 4;
+            auto newGfxObject = system_render.RW.createObjectWithInstancing(gfxObjectInfo.mesh, gfxObjectInfo.numInstances, newMaxInstances);
+            gfxObject = newGfxObject;
+            system_render.RW.destroyObject(oldGfxObject);
+        }
+        else {
+            gfxObject.addInstances(1);
+        }
     };
 
     if (info.separateMaterial) {

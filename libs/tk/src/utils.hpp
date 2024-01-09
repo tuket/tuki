@@ -119,6 +119,26 @@ auto make_vector(const T& t, const Ts&... ts) {
 
 std::string loadTextFile(CStr path);
 
+// computes the next power of two, unless it's already a power of two
+template <typename T>
+static constexpr T nextPowerOf2(T x) noexcept
+{
+    x--;
+    x |= x >> T(1);
+    x |= x >> T(2);
+    x |= x >> T(4);
+    if constexpr (sizeof(T) >= 2)
+        x |= x >> T(8);
+    if constexpr (sizeof(T) >= 4)
+        x |= x >> T(16);
+    if constexpr (sizeof(T) >= 8)
+        x |= x >> T(32);
+    if constexpr (sizeof(T) >= 16)
+        x |= x >> T(64);
+    x++;
+    return x;
+}
+
 template <typename F>
 struct _Defer {
     F f;

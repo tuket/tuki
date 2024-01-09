@@ -294,6 +294,7 @@ struct RenderWorldId;
 struct ObjectInfo {
     MeshRC mesh;
     u32 numInstances = 1;
+    u32 maxInstances = 1;
 };
 struct ObjectId : IdU32 {
     IdU32 _renderWorld = {};
@@ -303,13 +304,15 @@ struct ObjectId : IdU32 {
     ObjectInfo getInfo()const;
     void setModelMatrix(const glm::mat4& m, u32 instanceInd = 0);
     void setModelMatrices(CSpan<glm::mat4> matrices, u32 firstInstanceInd = 0);
+    bool addInstances(u32 n);
+    void destroyInstance(u32 instanceInd);
 };
 
 // RENDER WORLDS
 struct RenderWorldId : IdU32 {
-    ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1));
-    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices);
-    ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances);
+    ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1), u32 maxInstances = 0);
+    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances = 0);
+    ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances = 0);
     void destroyObject(ObjectId oid);
 };
 struct RenderWorld {
@@ -326,10 +329,9 @@ struct RenderWorld {
     std::vector<u32> objects_firstModelMtx;
     std::vector<glm::mat4> modelMatrices;
     std::vector<ObjectMatrices> objects_matricesTmp;
-    std::vector<u32> objects_accumInstancesTmp;
+    std::vector<u32> objects_instancesCursorsTmp;
     u32 numObjects = 0;
     u32 objects_nextFreeId = u32(-1);
-    u32 objects_nextFreeEntry = u32(-1);
     bool needDefragmentObjects = false;
     std::vector<std::vector<vk::Buffer>> instancingBuffers; // [swapchainImgInd][viewportInd]
     std::vector<vk::Buffer> global_uniformBuffers;
@@ -340,9 +342,9 @@ struct RenderWorld {
     // ** you can access the following members directly **
     glm::vec3 ambientLight = glm::vec3(0.1f);
 
-    ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1));
-    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices);
-    ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances);
+    ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1), u32 maxInstances = 0);
+    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances = 0);
+    ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances = 0);
     void destroyObject(ObjectId oid);
     void _defragmentObjects();
 };

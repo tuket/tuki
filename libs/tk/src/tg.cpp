@@ -942,6 +942,30 @@ void ObjectId::setModelMatrices(CSpan<glm::mat4> matrices, u32 firstInstanceInd)
 		RW.modelMatrices[RW.objects_firstModelMtx[e] + firstInstanceInd + i] = matrices[i];
 }
 
+bool ObjectId::addInstances(u32 n)
+{
+	auto& RW = RU.renderWorlds[_renderWorld.id];
+	const u32 e = RW.objects_id_to_entry[id];
+	auto& info = RW.objects_info[e];
+	if (info.numInstances + n <= info.maxInstances) {
+		info.numInstances += n;
+	}
+	else {
+		return false;
+	}
+}
+
+void ObjectId::destroyInstance(u32 instanceInd)
+{
+	auto& RW = RU.renderWorlds[_renderWorld.id];
+	const u32 e = RW.objects_id_to_entry[id];
+	auto& info = RW.objects_info[e];
+	assert(instanceInd < info.numInstances);
+	const u32 fmm = RW.objects_firstModelMtx[e];
+	RW.modelMatrices[fmm + instanceInd] = RW.modelMatrices[fmm + info.numInstances - 1];
+	info.numInstances--;
+}
+
 static void begingStagingCmdRecordingForNextFrame()
 {
 	// begin staging cmd recording for the next frame
@@ -1084,7 +1108,7 @@ RenderWorldId createRenderWorld()
 	RW.objects_firstModelMtx.reserve(numExpectedObjects);
 	RW.modelMatrices.reserve(numExpectedObjects);
 	RW.objects_matricesTmp.reserve(numExpectedObjects);
-	RW.objects_accumInstancesTmp.reserve(numExpectedObjects);
+	RW.objects_instancesCursorsTmp.reserve(numExpectedObjects);
 	const u32 numScImages = RU.swapchain.numImages;
 	RW.instancingBuffers.resize(numScImages);
 	
@@ -1125,12 +1149,6 @@ void destroyRenderWorld(RenderWorldId id)
 
 static u32 acquireObjectEntry(RenderWorld& RW)
 {
-	if (RW.objects_nextFreeEntry != u32(-1)) {
-		// there was a free entry
-		const u32 e = RW.objects_nextFreeEntry;
-		RW.objects_nextFreeEntry = RW.objects_info[e].numInstances;
-		return e;
-	}
 
 	// there wasn't a free entry; need to create one
 	const u32 e = RW.objects_info.size();
@@ -1138,12 +1156,6 @@ static u32 acquireObjectEntry(RenderWorld& RW)
 	RW.objects_info.emplace_back();
 	RW.objects_firstModelMtx.emplace_back();
 	return e;
-}
-static void releaseObjectEntry(RenderWorld& RW, u32 e)
-{
-	const u32 e2 = RW.objects_nextFreeEntry;
-	RW.objects_info[e].numInstances = e2;
-	RW.objects_nextFreeEntry = e;
 }
 
 static u32 acquireObjectId(RenderWorld& RW)
@@ -1166,17 +1178,17 @@ static void releaseObjectId(RenderWorld& RW, u32 id)
 	RW.objects_nextFreeId = id;
 }
 
-ObjectId RenderWorldId::createObject(MeshRC mesh, const glm::mat4& modelMtx)
+ObjectId RenderWorldId::createObject(MeshRC mesh, const glm::mat4& modelMtx, u32 maxInstances)
 {
-	return RU.renderWorlds[id].createObject(std::move(mesh), modelMtx);
+	return RU.renderWorlds[id].createObject(std::move(mesh), modelMtx, maxInstances);
 }
-ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices)
+ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances)
 {
-	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), instancesMatrices);
+	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), instancesMatrices, maxInstances);
 }
-ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, u32 numInstances)
+ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances)
 {
-	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), numInstances);
+	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), numInstances, maxInstances);
 }
 void RenderWorldId::destroyObject(ObjectId oid)
 {
@@ -1184,46 +1196,48 @@ void RenderWorldId::destroyObject(ObjectId oid)
 }
 
 template<bool PROVIDE_DATA>
-static ObjectId _createObjectWithInstancing(RenderWorld& RW, MeshRC mesh, u32 numInstances, const glm::mat4* instancesMatrices)
+static ObjectId _createObjectWithInstancing(RenderWorld& RW, MeshRC mesh, u32 numInstances, const glm::mat4* instancesMatrices, u32 maxInstances)
 {
+	maxInstances = glm::max(maxInstances, numInstances);
 	const u32 e = acquireObjectEntry(RW);
 	const u32 oid = acquireObjectId(RW);
 	RW.objects_entry_to_id[e] = oid;
 	RW.objects_id_to_entry[oid] = e;
-	RW.objects_info[e] = { mesh, numInstances };
+	RW.objects_info[e] = { mesh, numInstances, maxInstances };
 	RW.objects_firstModelMtx[e] = u32(RW.modelMatrices.size());
 	if constexpr (PROVIDE_DATA) {
 		for (u32 i = 0; i < numInstances; i++) {
 			const auto& m = instancesMatrices[i];
 			RW.modelMatrices.push_back(m);
 		}
+		RW.modelMatrices.resize(RW.modelMatrices.size() + maxInstances - numInstances);
 	}
 	else {
-		RW.modelMatrices.resize(RW.modelMatrices.size() + size_t(numInstances));
+		RW.modelMatrices.resize(RW.modelMatrices.size() + size_t(maxInstances));
 	}
-	return ObjectId(RW.id, { e });
+	return ObjectId(RW.id, { oid });
 }
 
-ObjectId RenderWorld::createObject(MeshRC mesh, const glm::mat4& modelMtx)
+ObjectId RenderWorld::createObject(MeshRC mesh, const glm::mat4& modelMtx, u32 maxInstances)
 {
-	return _createObjectWithInstancing<true>(*this, std::move(mesh), 1, &modelMtx);
+	return _createObjectWithInstancing<true>(*this, std::move(mesh), 1, &modelMtx, maxInstances);
 }
 
-ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices)
+ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances)
 {
-	return _createObjectWithInstancing<true>(*this, std::move(mesh), instancesMatrices.size(), instancesMatrices.data());
+	return _createObjectWithInstancing<true>(*this, std::move(mesh), instancesMatrices.size(), instancesMatrices.data(), maxInstances);
 }
 
-ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, u32 numInstances)
+ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances)
 {
-	return _createObjectWithInstancing<false>(*this, std::move(mesh), numInstances, nullptr);
+	return _createObjectWithInstancing<false>(*this, std::move(mesh), numInstances, nullptr, maxInstances);
 }
 
 void RenderWorld::destroyObject(ObjectId oid)
 {
 	const u32 e = objects_id_to_entry[oid.id];
 	objects_info[e].mesh = MeshRC{};
-	releaseObjectEntry(*this, e);
+	//releaseObjectEntry(*this, e);
 	releaseObjectId(*this, oid.id);
 	needDefragmentObjects = true;
 }
@@ -1238,7 +1252,7 @@ void RenderWorld::_defragmentObjects()
 	u32 objI;
 	for (objI = 0; objI < numObjs; objI++) {
 		if (objects_info[objI].mesh.id.isValid())
-			mtxI += objects_info[objI].numInstances;
+			mtxI += objects_info[objI].maxInstances;
 		else
 			break;
 	}
@@ -1250,12 +1264,15 @@ void RenderWorld::_defragmentObjects()
 			const u32 numInstances = info.numInstances;
 			objects_info[objI] = std::move(info);
 			objects_firstModelMtx[objI] = mtxI;
-			objects_entry_to_id[objI] = objects_entry_to_id[objJ];
-			objects_id_to_entry[objJ] = objI;
+			const u32 oid = objects_entry_to_id[objJ];
+			objects_entry_to_id[objI] = oid;
+			objects_id_to_entry[oid] = objI;
+			const u32 nextObjMtxI = mtxI + info.maxInstances;
 			for (u32 i = 0; i < numInstances; i++) {
 				modelMatrices[mtxI] = modelMatrices[firstModelMtx + i];
 				mtxI++;
 			}
+			mtxI = nextObjMtxI;
 
 			objI++;
 		}
@@ -1289,25 +1306,28 @@ static void draw_renderWorld(RenderWorldId renderWorldId, const RenderWorldViewp
 	RW._defragmentObjects();
 
 	const size_t numObjects = RW.objects_info.size();
-	RW.objects_accumInstancesTmp.resize(numObjects);
 	u32 totalInstances = 0;
 	for (size_t objectI = 0; objectI < numObjects; objectI++) {
-		RW.objects_accumInstancesTmp[objectI] = totalInstances;
 		totalInstances += RW.objects_info[objectI].numInstances;
 	}
 	RW.objects_matricesTmp.resize(totalInstances);
 
 	const glm::mat4 viewProj = rwViewport.projMtx * rwViewport.viewMtx;
-	u32 instanceCursor = 0;
+	u32 instancesCursor_src = 0;
+	u32 instancesCursor_dst = 0;
+	RW.objects_instancesCursorsTmp.resize(numObjects);
 	for (size_t objectI = 0; objectI < numObjects; objectI++) {
 		auto& objInfo = RW.objects_info[objectI];
 		for (size_t instanceI = 0; instanceI < objInfo.numInstances; instanceI++) {
-			const glm::mat4& modelMtx = RW.modelMatrices[instanceCursor];
-			RW.objects_matricesTmp[instanceCursor].modelMtx = modelMtx;
-			RW.objects_matricesTmp[instanceCursor].modelViewProj = viewProj * modelMtx;
-			RW.objects_matricesTmp[instanceCursor].invTransModelView = glm::inverse(glm::transpose(modelMtx));
-			instanceCursor++;
+			const glm::mat4& modelMtx = RW.modelMatrices[instancesCursor_src + instanceI];
+			auto& Ms = RW.objects_matricesTmp[instancesCursor_dst + instanceI];
+			Ms.modelMtx = modelMtx;
+			Ms.modelViewProj = viewProj * modelMtx;
+			Ms.invTransModelView = glm::inverse(glm::transpose(modelMtx));
 		}
+		RW.objects_instancesCursorsTmp[objectI] = instancesCursor_dst;
+		instancesCursor_src += RW.objects_info[objectI].maxInstances;
+		instancesCursor_dst += RW.objects_info[objectI].numInstances;
 	}
 
 	const size_t instancingBufferRequiredSize = 3 * sizeof(glm::mat4) * size_t(totalInstances);
@@ -1355,7 +1375,7 @@ static void draw_renderWorld(RenderWorldId renderWorldId, const RenderWorldViewp
 		const auto geomBuffer = RU.device.getVkHandle(geomId.getBuffer());
 
 		// instancing buffer
-		cmdBuffer_draw.cmd_bindVertexBuffer(0, RU.device.getVkHandle(instancingBuffer), sizeof(RenderWorld::ObjectMatrices) * RW.objects_accumInstancesTmp[objectI]);
+		cmdBuffer_draw.cmd_bindVertexBuffer(0, RU.device.getVkHandle(instancingBuffer), sizeof(RenderWorld::ObjectMatrices) * RW.objects_instancesCursorsTmp[objectI]);
 		// positions
 		cmdBuffer_draw.cmd_bindVertexBuffer(1, geomBuffer, geomInfo.attribOffset_positions);
 		// normals
