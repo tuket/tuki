@@ -1,6 +1,7 @@
 #include "tk.hpp"
 
 #include <glm/gtx/quaternion.hpp>
+#include <imgui.h>
 
 namespace tk {
 
@@ -8,29 +9,22 @@ namespace tk {
 std::vector<std::string> ComponentsDB::componentTypesNames;
 
 // -- ENTITIES --
+
 std::vector<std::string> EntityFactory::entityTypesNames;
 
 EntityId EntityFactory_Renderable3d::create(const Create& info)
 {
-    u32 e = components_nextFreeEntry;
-    if (e == u32(-1)) {
-        e = u32(components_position3d.size());
-        indsInWorld.emplace_back();
-        components_position3d.push_back({ info.position });
-        components_rotation3d.push_back({ info.rotation });
-        components_scale3d.push_back({ info.scale });
-        components_renderableMesh.emplace_back();
-    }
-    else {
-        components_position3d[e] = { info.position };
-        components_rotation3d[e] = { info.rotation };
-        components_scale3d[e] = { info.scale };
-    }
+    const u32 e = u32(components_position3d.size());
+    indsInWorld.emplace_back();
+    components_position3d.push_back({ info.position });
+    components_rotation3d.push_back({ info.rotation });
+    components_scale3d.push_back({ info.scale });
+    components_renderableMesh.emplace_back();
 
     u32 gfxObjectInd;
     u32 instanceInd = 0;
-    auto addGfxObjectInstance = [this, &gfxObjectInd, &instanceInd](u32 renderableMeshInd) {
-        gfxObjectInd = components_renderableMesh[renderableMeshInd].gfxObjectInd;
+    auto addGfxObjectInstance = [this, e, &gfxObjectInd, &instanceInd](u32 _gfxObjectInd) {
+        gfxObjectInd = _gfxObjectInd;
         auto& gfxObject = gfxObjects[gfxObjectInd];
         tg::ObjectId oldGfxObject = gfxObject;
         auto gfxObjectInfo = gfxObject.getInfo();
@@ -52,11 +46,11 @@ EntityId EntityFactory_Renderable3d::create(const Create& info)
 
     if (info.separateMaterial) {
         const u64 geomAndMaterial = (u64(info.geom.id.id) << u64(32)) | u64(info.material.id.id);
-        if (auto it = geomAndMaterial_to_renderableInd.find(geomAndMaterial); it == geomAndMaterial_to_renderableInd.end()) {
+        if (auto it = geomAndMaterial_to_gfxObjectInd.find(geomAndMaterial); it == geomAndMaterial_to_gfxObjectInd.end()) {
             auto mesh = gfx::makeMesh({ .geom = info.geom, .material = info.material });
             gfxObjects.emplace_back(system_render.RW.createObject(mesh));
             gfxObjectInd = u32(gfxObjects.size() - 1);
-            geomAndMaterial_to_renderableInd[geomAndMaterial] = e;
+            geomAndMaterial_to_gfxObjectInd[geomAndMaterial] = gfxObjectInd;
         }
         else {
             addGfxObjectInstance(it->second);
@@ -64,10 +58,10 @@ EntityId EntityFactory_Renderable3d::create(const Create& info)
     }
     else {
         const u32 meshInd = info.mesh.id.id;
-        if (auto it = mesh_to_renderableInd.find(meshInd); it == mesh_to_renderableInd.end()) {
+        if (auto it = mesh_to_gfxObjectInd.find(meshInd); it == mesh_to_gfxObjectInd.end()) {
             gfxObjectInd = u32(gfxObjects.size());
             gfxObjects.emplace_back(system_render.RW.createObject(info.mesh));
-            mesh_to_renderableInd[meshInd] = e;
+            mesh_to_gfxObjectInd[meshInd] = gfxObjectInd;
         }
         else {
             addGfxObjectInstance(it->second);
@@ -80,9 +74,9 @@ EntityId EntityFactory_Renderable3d::create(const Create& info)
     return id;
 }
 
+#if 0
 void EntityFactory_Renderable3d::s_allocEntitiesFn(EntityFactory* self, std::span<EntityId> entities, CSpan<const u8*> data)
 {
-#if 0
     auto& factory = *(EntityFactory_Renderable3d*)self;
     const u32 N = u32(entities.size());
     u32 i;
@@ -100,12 +94,83 @@ void EntityFactory_Renderable3d::s_allocEntitiesFn(EntityFactory* self, std::spa
         factory.components_rotation3d.resize(newSize);
         factory.components_gfxObject.resize(newSize);
     }
-#endif
 }
+#endif
 
-void EntityFactory_Renderable3d::s_releaseEntitiesFn(EntityFactory* self, CSpan<EntityId> entities)
+void EntityFactory_Renderable3d::s_releaseEntitiesFn(EntityFactory* self, CSpan<u32> entitiesIndInWorld)
 {
+    auto& W = self->world;
+    auto& factory = *(EntityFactory_Renderable3d*)self;
+    auto RW = factory.system_render.RW;
+    auto& indsInFactory = W.entities_indInFactory;
+    for (u32 indInWorld : entitiesIndInWorld) {
+        const u32 indInFactory = indsInFactory[indInWorld];
+        factory.indsInWorld[indInFactory] = u32(-1); // mark the entries to delete
+    }
 
+    { // iterate though the entities and delete the ones that were marked with u32(-1)
+        u32 i; // set i to the first entry marked with u32(-1)
+        for (i = 0; i < factory.indsInWorld.size(); i++) {
+            if (factory.indsInWorld[i] == u32(-1))
+                break;
+        }
+        u32 j; // we use the index j to try to find non-marked entries, then we copy from [j] to [i]
+        for (j = i + 1; j < factory.indsInWorld.size(); j++) {
+            const u32 indInWorldJ = factory.indsInWorld[j];
+            if (indInWorldJ == u32(-1))
+                continue;
+
+            W.entities_indInFactory[indInWorldJ] = i;
+            factory.indsInWorld[i] = factory.indsInWorld[j];
+            factory.components_position3d[i] = factory.components_position3d[j];
+            factory.components_rotation3d[i] = factory.components_rotation3d[j];
+            factory.components_scale3d[i] = factory.components_scale3d[j];
+            factory.components_renderableMesh[i] = factory.components_renderableMesh[j];
+            i++;
+        }
+        factory.indsInWorld.resize(i); // this sucks: I wish there was a SOA vector in C++
+        factory.components_position3d.resize(i);
+        factory.components_rotation3d.resize(i);
+        factory.components_scale3d.resize(i);
+        factory.components_renderableMesh.resize(i);
+    }
+
+    { // now let's find unused gfxObjects and delete them
+        std::vector<u32> useCount(factory.gfxObjects.size(), 0);
+        for (auto& rm : factory.components_renderableMesh) {
+            rm.instanceInd = useCount[rm.gfxObjectInd]++;
+        }
+
+        u32 i; // set i to the first gfxObject with useCount == 0
+        for (i = 0; i < useCount.size(); i++) {
+            if (useCount[i] == 0) {
+                RW.destroyObject(factory.gfxObjects[i]);
+                break;
+            }
+            const bool ok = factory.gfxObjects[i].changeNumInstances(useCount[i]);
+            assert(ok);
+        }
+        std::vector<u32> gfxObjectIndRemapping(factory.gfxObjects.size(), u32(-1));
+        u32 j; // we use index j to find gfxObjects with useCount != 0, then we copy from [j] to [i]
+        for (j = i + 1; j < useCount.size(); j++) {
+            if (useCount[j] == 0) {
+                RW.destroyObject(factory.gfxObjects[j]);
+                continue;
+            }
+
+            gfxObjectIndRemapping[j] = i;
+            factory.gfxObjects[i] = factory.gfxObjects[j];
+            factory.gfxObjects[i].changeNumInstances(useCount[j]);
+            i++;
+        }
+
+        // update indices to gfxObjects using the table(gfxObjectIndRemapping)
+        for (auto& rm : factory.components_renderableMesh) {
+            const u32 newInd = gfxObjectIndRemapping[rm.gfxObjectInd];
+            if(newInd != u32(-1))
+                rm.gfxObjectInd = newInd;
+        }
+    }
 }
 
 void* EntityFactory_Renderable3d::s_accessComponentByIndFn(EntityFactory* self, u32 entityIndInFactory, u16 componentTypeInd)
@@ -150,6 +215,10 @@ void System_Render::update(float dt)
         auto& gfxObject = factory_renderable3d->gfxObjects[gfxObjectInd];
         gfxObject.setModelMatrix(buildMtx(position, rotation, scale), rendMeshComp.instanceInd);
     }
+
+#if 1
+    RW.debugGui();
+#endif
 }
 
 // -- DefaultBasicWorldSystems --
@@ -184,6 +253,32 @@ WorldId World::id()const
 
 void World::update(float dt)
 {
+    if (entitiesToDelete.size()) {
+        // 1) delete the entities in the factories
+        auto sortedByType = entitiesToDelete;
+        std::sort(sortedByType.begin(), sortedByType.end(), [this](u32 a, u32 b) {
+            return entities_type[a] < entities_type[b];
+        });
+
+        for (u32 i = 0; i < sortedByType.size(); ) {
+            const u16 type = entities_type[sortedByType[i]];
+            u32 count;
+            for (count = 1;
+                i + count < sortedByType.size() && type == entities_type[sortedByType[i + count]];
+                count++);
+            entityFactories[type]->releaseEntities(CSpan<u32>(sortedByType).subspan(i, count));
+            i += count;
+        }
+
+        // 2) release the entities in the world
+        for (u32 ind : entitiesToDelete)
+            _breakEntityLinks(ind);
+        for (u32 ind : entitiesToDelete)
+            _destroyIsolatedEntity(ind);
+
+        entitiesToDelete.clear();
+    }
+
     std::fill(cachedEntityMatrices_isValid.begin(), cachedEntityMatrices_isValid.end(), false);
 }
 
@@ -223,10 +318,11 @@ const glm::mat4& World::getMatrix(u32 entityInd)
 static void assertEntityIsValidInWorld(EntityId e, const World& W)
 {
     assert(e.world == W.id());
-    //assert(e.counter == W.entities_counter[e.ind]);
+    assert(e.counter == W.entities_counter[e.ind]);
+    assert(e.type == W.entities_type[e.ind]);
 }
 
-EntityId World::_createEntity(EntityTypeU16 entityType, u32 indInFactory)
+EntityId World::_createEntity(EntityTypeU16 entityType, u32 indInFactory, u32 parent)
 {
     u32 e = entities_nextFreeEntry;
     if (e == u32(-1)) {
@@ -252,27 +348,71 @@ EntityId World::_createEntity(EntityTypeU16 entityType, u32 indInFactory)
         entities_nextSibling[e] = 0;
         entities_prevSibling[e] = 0;
     }
-    return EntityId{id(), entityType, e,
+    const EntityId eid = { id(), entityType, e,
 #ifndef NDEBUG
         entities_counter[e]
 #endif
     };
+    setEntityAsLastChildOf(eid, getRootEntity());
+
+    return eid;
 }
 
-void World::_destroyEntity(EntityId eId)
+EntityId World::getRootEntity()const
 {
-    if (eId.ind == 0) {
-        assert(false && "Attempted to destroy invalid entity");
-        return;
-    }
-    assert(entities_counter[eId.ind] == eId.counter && "Entity freed twice?");
+    return EntityId{
+        .world = id().ind,
+        .type = 0,
+        .ind = 0,
+    };
+}
 
-    const u32 prevFree = entities_nextFreeEntry;
-    entities_nextFreeEntry = eId.ind;
+void World::addEntitiesToDelete(CSpan<u32> entities)
+{
+    entitiesToDelete.insert(entitiesToDelete.end(), entities.begin(), entities.end());
+}
+
+EntityId World::getEntityByInd(u32 ind)const
+{
+    if (ind == u32(-1))
+        return EntityId{ .world = id(), .ind = u32(-1) };
+
+    return EntityId{
+        .world = id(),
+        .type = entities_type[ind],
+        .ind = ind,
 #ifndef NDEBUG
-    entities_counter[eId.ind]++;
+        .counter = entities_counter[ind],
 #endif
-    entities_indInFactory[eId.ind] = prevFree;
+    };
+}
+
+EntityId World::getParent(EntityId e)const
+{
+    assertEntityIsValidInWorld(e, *this);
+    return getEntityByInd(entities_parent[e.ind]);
+}
+
+EntityId World::firstChild(EntityId e)const
+{
+    assertEntityIsValidInWorld(e, *this);
+    return getEntityByInd(entities_firstChild[e.ind]);
+}
+
+EntityId World::nextSibling(EntityId e)const
+{
+    assertEntityIsValidInWorld(e, *this);
+    return getEntityByInd(entities_nextSibling[e.ind]);
+}
+
+void World::_destroyIsolatedEntity(u32 indInWorld)
+{
+    const u32 prevFree = entities_nextFreeEntry;
+    entities_nextFreeEntry = indInWorld;
+#ifndef NDEBUG
+    entities_counter[indInWorld]++;
+#endif
+    entities_indInFactory[indInWorld] = prevFree;
 }
 
 void World::_breakEntityLinks(u32 ei)
@@ -364,6 +504,33 @@ WorldId createWorld()
 World* WorldId::operator->()
 {
     return &g_worlds[ind];
+}
+const World* WorldId::operator->()const
+{
+    return &g_worlds[ind];
+}
+
+// EntityId
+bool EntityId::valid()const
+{
+    return ind != u32(-1);
+}
+EntityId EntityId::parent()const
+{
+    return world->getParent(*this);
+}
+EntityId EntityId::firstChild()const
+{
+    return world->firstChild(*this);
+}
+EntityId EntityId::nextSibling()const
+{
+    return world->nextSibling(*this);
+}
+
+void EntityId::destroy()
+{
+    world->addEntitiesToDelete({ &ind, 1 });
 }
 
 }

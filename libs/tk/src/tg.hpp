@@ -82,6 +82,7 @@ struct InitRenderUniverseParams {
     VkInstance instance;
     VkSurfaceKHR surface;
     u32 screenW, screenH;
+    bool enableImgui = false;
 };
 void initRenderUniverse(const InitRenderUniverseParams& params);
 
@@ -305,15 +306,20 @@ struct ObjectId : IdU32 {
     void setModelMatrix(const glm::mat4& m, u32 instanceInd = 0);
     void setModelMatrices(CSpan<glm::mat4> matrices, u32 firstInstanceInd = 0);
     bool addInstances(u32 n);
+    bool changeNumInstances(u32 n);
     void destroyInstance(u32 instanceInd);
 };
 
 // RENDER WORLDS
+struct RenderWorld;
+
 struct RenderWorldId : IdU32 {
     ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1), u32 maxInstances = 0);
     ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances = 0);
     ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances = 0);
     void destroyObject(ObjectId oid);
+
+    void debugGui();
 };
 struct RenderWorld {
     struct ObjectMatrices {
@@ -354,6 +360,9 @@ void destroyRenderWorld(RenderWorldId id);
 // draw
 struct RenderWorldViewport { RenderWorldId renderWorld; glm::mat4 viewMtx; glm::mat4 projMtx; vk::Viewport viewport; vk::Rect2d scissor; };
 void draw(CSpan<RenderWorldViewport> viewports);
+
+// imgui
+void imgui_newFrame();
 
 }
 }

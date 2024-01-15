@@ -5,6 +5,9 @@
 #include "shader_compiler.hpp"
 #include <format>
 
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_vulkan.h>
+
 namespace tk {
 namespace gfx {
 
@@ -33,6 +36,7 @@ struct RenderUniverse
 	vk::Format depthStencilFormat;
 	u32 screenW = 0, screenH = 0;
 	u32 oldScreenW, oldScreenH = 0;
+	u8 msaa = 1;
 	vk::SwapchainOptions swapchainOptions;
 	vk::SwapchainSyncHelper swapchain;
 	vk::Image depthStencilImages[MAX_SWAPCHAIN_IMAGES];
@@ -94,6 +98,12 @@ struct RenderUniverse
 	// RenderWorlds
 	std::vector<RenderWorld> renderWorlds;
 	u32 renderWorlds_nextFreeEntry = u32(-1);
+
+	// imgui
+	struct ImGui {
+		bool enabled = false;
+		VkDescriptorPool descPool = VK_NULL_HANDLE;
+	} imgui;
 
 	~RenderUniverse() {
 		printf("~RenderUniverse()\n");
@@ -949,10 +959,21 @@ bool ObjectId::addInstances(u32 n)
 	auto& info = RW.objects_info[e];
 	if (info.numInstances + n <= info.maxInstances) {
 		info.numInstances += n;
+		return true;
 	}
-	else {
-		return false;
+	return false;
+}
+
+bool ObjectId::changeNumInstances(u32 n)
+{
+	auto& RW = RU.renderWorlds[_renderWorld.id];
+	const u32 e = RW.objects_id_to_entry[id];
+	auto& info = RW.objects_info[e];
+	if (n <= info.maxInstances) {
+		info.numInstances = n;
+		return true;
 	}
+	return false;
 }
 
 void ObjectId::destroyInstance(u32 instanceInd)
@@ -1064,6 +1085,32 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 	}
 
 	RU.defaultSampler = RU.device.createSampler(vk::Filter::linear, vk::Filter::linear, vk::SamplerMipmapMode::linear, vk::SamplerAddressMode::clampToEdge);
+
+	RU.imgui.enabled = params.enableImgui;
+	if (params.enableImgui) {
+		const VkDescriptorPoolSize sizes[] = { VkDescriptorPoolSize {
+			.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.descriptorCount = 1,
+		} };
+		RU.imgui.descPool = RU.device.createDescriptorPool(1, sizes, {});
+
+		ImGui_ImplVulkan_InitInfo info = {
+			.Instance = RU.device.instance,
+			.PhysicalDevice = RU.device.physicalDevice.handle,
+			.Device = RU.device.device,
+			.QueueFamily = RU.queueFamily,
+			.Queue = RU.device.queues[RU.queueFamily][0],
+			.PipelineCache = VK_NULL_HANDLE,
+			.DescriptorPool = RU.imgui.descPool,
+			.Subpass = 0,
+			.MinImageCount = RU.swapchainOptions.minImages,
+			.ImageCount = RU.swapchain.numImages,
+			.MSAASamples = VkSampleCountFlagBits(RU.msaa),
+			.Allocator = VK_NULL_HANDLE,
+			.CheckVkResultFn = nullptr,
+		};
+		ImGui_ImplVulkan_Init(&info, RU.renderPass);
+	}
 
 	begingStagingCmdRecordingForNextFrame();
 }
@@ -1193,6 +1240,25 @@ ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, u32 numInstances
 void RenderWorldId::destroyObject(ObjectId oid)
 {
 	RU.renderWorlds[id].destroyObject(oid);
+}
+
+void RenderWorldId::debugGui()
+{
+	ImGui::Begin("RenderWorld");
+	auto& RW = RU.renderWorlds[id];
+	for (u32 entry = 0; entry < RW.objects_entry_to_id.size(); entry++) {
+		const u32 id = RW.objects_entry_to_id[entry];
+		if (!RW.objects_info[entry].mesh.id.isValid())
+			continue;
+		const auto& info = RW.objects_info[entry];
+		if (ImGui::TreeNode((void*) 0, "%d", id)) {
+			ImGui::Text("Mesh: %d", info.mesh.id);
+			ImGui::Text("Max Instances: %d", info.maxInstances);
+			ImGui::Text("Num Instances: %d", info.numInstances);
+			ImGui::TreePop();
+		}
+	}
+	ImGui::End();
 }
 
 template<bool PROVIDE_DATA>
@@ -1443,6 +1509,7 @@ void draw(CSpan<RenderWorldViewport> viewports)
 		RU.depthStencilImages[scImgInd] = RU.device.createImage({
 			.size = {u16(RU.screenW), u16(RU.screenH)},
 			.format = RU.depthStencilFormat,
+			.numSamples = RU.msaa,
 			.usage = vk::ImageUsage::default_framebuffer(false, false),
 		});
 		RU.depthStencilImageViews[scImgInd] = RU.device.createImageView({ .image = RU.depthStencilImages[scImgInd]	});
@@ -1634,6 +1701,13 @@ void draw(CSpan<RenderWorldViewport> viewports)
 	// end render pass
 	cmdBuffer_draw.cmd_endRenderPass();
 
+	// imgui
+	{
+		ImGui::Render();
+		ImDrawData* drawData = ImGui::GetDrawData();
+		ImGui_ImplVulkan_RenderDrawData(drawData, cmdBuffer_draw.handle);
+	}
+
 	// submit everything
 	cmdBuffer_draw.end();
 	{
@@ -1675,6 +1749,14 @@ void draw(CSpan<RenderWorldViewport> viewports)
 	RU.swapchain.present(mainQueue);
 
 	begingStagingCmdRecordingForNextFrame();
+}
+
+void imgui_newFrame()
+{
+	// Start the Dear ImGui frame
+	ImGui_ImplVulkan_NewFrame();
+	ImGui_ImplGlfw_NewFrame();
+	ImGui::NewFrame();
 }
 
 }

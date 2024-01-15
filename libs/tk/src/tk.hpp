@@ -15,6 +15,7 @@ struct WorldId {
     u16 ind = u16(-1);
     auto operator<=>(const WorldId& o)const = default;
     World* operator->();
+    const World* operator->()const;
 };
 
 struct World;
@@ -37,10 +38,17 @@ struct ComponentsDB
 struct EntityId {
     WorldId world;
     EntityTypeU16 type;
-    u32 ind;
+    u32 ind = u32(-1);
 #ifndef NDEBUG
     u32 counter;
 #endif
+
+    bool valid()const;
+    EntityId parent()const;
+    EntityId firstChild()const;
+    EntityId nextSibling()const;
+
+    void destroy();
 };
 
 struct EntityFactory
@@ -52,23 +60,23 @@ struct EntityFactory
         return entityTypesNames.size()-1;
     }
 
-    typedef void (*AllocEntitiesFn)(EntityFactory* self, std::span<EntityId> entities, CSpan<const u8*> data);
-    typedef void (*ReleaseEntitiesFn)(EntityFactory* self, CSpan<EntityId> entities);
+    //typedef void (*AllocEntitiesFn)(EntityFactory* self, std::span<EntityId> entities, CSpan<const u8*> data);
+    typedef void (*ReleaseEntitiesFn)(EntityFactory* self, CSpan<u32> entitiesIndInWorld);
     typedef void* (*AccessComponentFn)(EntityFactory* self, u32 entityIndInFactory, ComponentTypeU16 componentType);
 
     World& world;
     std::string entityTypeName;
     std::vector<ComponentTypeU16> componentTypes;
-    AllocEntitiesFn allocEntitiesFn;
+    //AllocEntitiesFn allocEntitiesFn;
     ReleaseEntitiesFn releaseEntitiesFn;
     AccessComponentFn accessComponentByIndFn;
 
     EntityFactory(World& world, std::string_view entityTypeName, CSpan<ComponentTypeU16> componentTypes,
-        AllocEntitiesFn allocEntitiesFn, ReleaseEntitiesFn releaseEntitiesFn, AccessComponentFn accessComponentFn
+        /*AllocEntitiesFn allocEntitiesFn,*/ ReleaseEntitiesFn releaseEntitiesFn, AccessComponentFn accessComponentFn
     )
         : world(world), entityTypeName(entityTypeName),
         componentTypes(componentTypes.begin(), componentTypes.end()),
-        allocEntitiesFn(allocEntitiesFn), releaseEntitiesFn(releaseEntitiesFn), accessComponentByIndFn(accessComponentFn)
+        /*allocEntitiesFn(allocEntitiesFn),*/ releaseEntitiesFn(releaseEntitiesFn), accessComponentByIndFn(accessComponentFn)
     {}
 
     virtual ~EntityFactory() = default;
@@ -91,6 +99,8 @@ struct EntityFactory
         assert(componentTypeInd != u16(-1));
         return *(Comp*)accessComponentByIndFn(this, entityIndInFactory, componentTypeInd);
     }
+
+    void releaseEntities(CSpan<u32> entitiesIndInWorld) { releaseEntitiesFn(this, entitiesIndInWorld); }
 };
 
 // -- COMPONENTS --
@@ -128,6 +138,33 @@ struct Component_RenderableMesh3d {
 
 struct System_Render;
 
+struct EntityFactory_Node : EntityFactory
+{
+    static EntityTypeU16 s_type() {
+        static EntityTypeU16 id = EntityFactory::registerEntityType("Node");
+        return id;
+    }
+
+    std::vector<u32> indsInWorld; // indInFactory -> indInWorld
+    std::vector<Component_Position3d> components_position3d; // [indInFactory]
+    std::vector<Component_Rotation3d> components_rotation3d; // [indInFactory]
+    std::vector<Component_Scale3d> components_scale3d; // [indInFactory]
+
+    EntityFactory_Node(World& world, System_Render& system_render)
+        : EntityFactory(world, "Renderable3d", {}, s_releaseEntitiesFn, s_accessComponentByIndFn)
+    {}
+
+    struct Create {
+        glm::vec3 position = glm::vec3(0);
+        glm::quat rotation = glm::quat();
+        glm::vec3 scale = glm::vec3(1);
+    };
+    EntityId create(const Create& info);
+
+    static void s_releaseEntitiesFn(EntityFactory* self, CSpan<u32> entitiesIndInWorld);
+    static void* s_accessComponentByIndFn(EntityFactory* self, u32 entityIndInFactory, u16 componentTypeInd);
+};
+
 struct EntityFactory_Renderable3d : EntityFactory
 {
     static EntityTypeU16 s_type() {
@@ -145,20 +182,18 @@ struct EntityFactory_Renderable3d : EntityFactory
     System_Render& system_render;
 
     std::vector<u32> indsInWorld; // indInFactory -> indInWorld
-    std::vector<Component_Position3d> components_position3d;
-    std::vector<Component_Rotation3d> components_rotation3d;
-    std::vector<Component_Scale3d> components_scale3d;
-    std::vector<Component_RenderableMesh3d> components_renderableMesh;
-    u32 components_nextFreeEntry = u32(-1);
+    std::vector<Component_Position3d> components_position3d; // [indInFactory]
+    std::vector<Component_Rotation3d> components_rotation3d; // [indInFactory]
+    std::vector<Component_Scale3d> components_scale3d; // [indInFactory]
+    std::vector<Component_RenderableMesh3d> components_renderableMesh; // [indInFactory]
     
-    std::vector<gfx::ObjectId> gfxObjects;
-    u32 gfxObjects_nextFreeEntry = u32(-1);
+    std::vector<gfx::ObjectId> gfxObjects; // [gfxObjectInd]
 
-    std::unordered_map<u32, u32> mesh_to_renderableInd;
-    std::unordered_map<u64, u32> geomAndMaterial_to_renderableInd;
+    std::unordered_map<u32, u32> mesh_to_gfxObjectInd;
+    std::unordered_map<u64, u32> geomAndMaterial_to_gfxObjectInd;
 
     EntityFactory_Renderable3d(World& world, System_Render& system_render)
-        : EntityFactory(world, "Renderable3d", k_componentTypes, s_allocEntitiesFn, s_releaseEntitiesFn, s_accessComponentByIndFn)
+        : EntityFactory(world, "Renderable3d", k_componentTypes, s_releaseEntitiesFn, s_accessComponentByIndFn)
         , system_render(system_render)
     {}
 
@@ -186,8 +221,7 @@ struct EntityFactory_Renderable3d : EntityFactory
     };
     EntityId create(const Create& info);
 
-    static void s_allocEntitiesFn(EntityFactory* self, std::span<EntityId> entities, CSpan<const u8*> data);
-    static void s_releaseEntitiesFn(EntityFactory* self, CSpan<EntityId> entities);
+    static void s_releaseEntitiesFn(EntityFactory* self, CSpan<u32> entitiesIndInWorld);
     static void* s_accessComponentByIndFn(EntityFactory* self, u32 entityIndInFactory, u16 componentTypeInd);
 };
 
@@ -240,14 +274,13 @@ struct World
 
     std::vector<glm::mat4> cachedEntityMatrices;
     std::vector<bool> cachedEntityMatrices_isValid;
+    std::vector<u32> entitiesToDelete;
 
     u32 entities_nextFreeEntry = u32(-1);
 
     // component hierarchy
     std::vector<std::vector<u32>> entitiesComponents; // [entityType][i]
 
-    // systems
-    std::vector<void*> systems;
 
     World();
 
@@ -257,14 +290,23 @@ struct World
 
     const glm::mat4& getMatrix(u32 entityInd);
 
-    EntityId _createEntity(EntityTypeU16 entityType, u32 indInFactory); // meant to be used by EntityFactories
-    void _destroyEntity(EntityId eId); // meant to be used by EntityFactories
+    EntityId _createEntity(EntityTypeU16 entityType, u32 indInFactory, u32 parent = 0); // meant to be used by EntityFactories
+    void _destroyIsolatedEntity(u32 indInWorld); // meant to be used by EntityFactories (?)
+
+    // functions querying the scene hierarchy
+    EntityId getRootEntity()const;
+    EntityId getEntityByInd(u32 ind)const;
+    EntityId getParent(EntityId e)const;
+    EntityId firstChild(EntityId e)const;
+    EntityId nextSibling(EntityId e)const;
 
     // functions for modifying the scene hierarchy
     void _breakEntityLinks(u32 entityInd);
     void setEntityAsFirstChildOf(EntityId e, EntityId p);
     void setEntityAsLastChildOf(EntityId e, EntityId p);
     void setEntityNextSiblingAfter(EntityId e, EntityId s);
+
+    void addEntitiesToDelete(CSpan<u32> entities);
 
     template <typename EF>
     EntityTypeU16 registerEntityFactory(EF* ef) {
@@ -277,6 +319,9 @@ struct World
 
     template <typename EF, typename... Args>
     EntityTypeU16 createAndRegisterEntityFactory(Args&&... args) {
+        auto typeInd = EF::s_type();
+        if (typeInd < entityFactories.size() && entityFactories[typeInd] != nullptr)
+            return typeInd; // already registered
         return registerEntityFactory<EF>( new EF(*this, std::forward<Args>(args)...) );
     }
 

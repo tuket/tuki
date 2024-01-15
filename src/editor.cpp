@@ -6,6 +6,9 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/transform.hpp>
 #include <tk.hpp>
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_vulkan.h>
 
 namespace tvk = tk::vk;
 using tk::CSpan;
@@ -168,6 +171,66 @@ static Camera camera = {
 	.orbit = initialOrbitCam,
 };
 
+static void initImGui(GLFWwindow* window)
+{
+	ImGui::CreateContext();
+	ImGui::StyleColorsDark();
+	ImGui_ImplGlfw_InitForVulkan(window, true);
+}
+
+static tk::WorldId mainWorld;
+static std::vector<bool> entitiesSelected;
+
+static void deleteSelectedEntities(tk::WorldId mainWorld)
+{
+	tk::EntityId e = mainWorld->getRootEntity().firstChild();
+	u32 i = 0;
+	std::vector<u32> toDelete;
+	while (e.valid()) {
+		const auto nextE = e.nextSibling();
+		if (entitiesSelected[e.ind]) {
+			toDelete.push_back(e.ind);
+		}
+		i++;
+		e = nextE;
+	}
+	mainWorld->addEntitiesToDelete(toDelete);
+	entitiesSelected.resize(entitiesSelected.size() - toDelete.size());
+	std::fill(entitiesSelected.begin(), entitiesSelected.end(), false);
+}
+
+static void imgui_hierarchy(tk::WorldId mainWorld)
+{
+	ImGui::Begin("scene");
+	tk::EntityId e = mainWorld->getRootEntity().firstChild();
+	int i = 0;
+	tk::EntityId clicked = {};
+	while (e.valid()) {
+		ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+		entitiesSelected.resize(glm::max(entitiesSelected.size(), size_t(e.ind+1)));
+		if (entitiesSelected[e.ind])
+			flags |= ImGuiTreeNodeFlags_Selected;
+		
+		ImGui::TreeNodeEx((void*)(intptr_t)i, flags, "%d", i);
+		if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+			clicked = e;
+
+		i++;
+		e = e.nextSibling();
+	}
+
+	if (clicked.valid()) {
+		if (ImGui::GetIO().KeyCtrl)
+			entitiesSelected[clicked.ind].flip();
+		else {
+			std::fill(entitiesSelected.begin(), entitiesSelected.end(), false);
+			entitiesSelected[clicked.ind] = true;
+		}
+	}
+
+	ImGui::End();
+}
+
 int main()
 {
 	completeCubeInds();
@@ -176,7 +239,7 @@ int main()
 	defer(glfwTerminate());
 	
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // don't create OpenGL context
-	int screenW = 800, screenH = 600;
+	int screenW = 1000, screenH = 800;
 	auto glfwWindow = glfwCreateWindow(screenW, screenH, "tuki editor", nullptr, nullptr);
 
 	u32 numRequiredExtensions;
@@ -187,14 +250,16 @@ int main()
 
 	VkSurfaceKHR surface;
 	tvk::ASSERT_VKRES(glfwCreateWindowSurface(instance, glfwWindow, nullptr, &surface));
+	
+	initImGui(glfwWindow);
 
-	tg::initRenderUniverse({ .instance = instance, .surface = surface, .screenW = u32(screenW), .screenH = u32(screenH) });
+	tg::initRenderUniverse({ .instance = instance, .surface = surface, .screenW = u32(screenW), .screenH = u32(screenH), .enableImgui = true });
 
 	//tg::PbrMaterialManager pbrMgr = {};
 	//pbrMgr.init();
 	//tg::registerMaterialManager(pbrMgr.getRegisterCallbacks());
 
-	auto mainWorld = tk::createWorld();
+	mainWorld = tk::createWorld();
 	//defer(tk::destroyWorld());
 
 	auto systems = mainWorld->createDefaultBasicSystems();
@@ -231,13 +296,13 @@ int main()
 		glm::translate(glm::vec3(0, 0, +2)),
 	};
 
-	const int n = 10;
+	const int n = 2;
 	for (int iy = 0; iy < n; iy++) {
 		for (int ix = 0; ix < n; ix++) {
 			const bool cubeType = (iy + ix) % 2 == 0;
 			factory_renderable3d->create({
-				.position = glm::vec3(0.6f*(ix - n/2 + 0.5f), 0.6f * (iy - n/2 + 0.5f), 0),
-				.scale = glm::vec3(0.2),
+				.position = glm::vec3(6.f/n * (ix - n/2 + 0.5f), 6.f/n * (iy - n/2 + 0.5f), 0),
+				.scale = glm::vec3(2.0/n),
 				.separateMaterial = false,
 				.mesh = cubeType ? cubeMesh : crateMesh,
 			});
@@ -250,8 +315,11 @@ int main()
 	float prevTime = glfwGetTime();
 
 	glfwSetKeyCallback(glfwWindow, [](GLFWwindow* w, int key, int scancode, int action, int mods) {
-		if (key == GLFW_KEY_F1 && action == GLFW_PRESS) {
-			camera.flipMode();
+		if (action == GLFW_PRESS) {
+			if (key == GLFW_KEY_DELETE)
+				deleteSelectedEntities(mainWorld);
+			if (key == GLFW_KEY_F1)
+				camera.flipMode();
 		}
 	});
 
@@ -276,10 +344,14 @@ int main()
 		glfwGetFramebufferSize(glfwWindow, &screenW, &screenH);
 		const float aspectRatio = float(screenW) / float(screenH);
 
+		tg::imgui_newFrame();
+
+		auto& imgui_io = ImGui::GetIO();
+
 		// camera rotation
 		glm::dvec2 mousePos;
 		glfwGetCursorPos(glfwWindow, &mousePos.x, &mousePos.y);
-		if (glfwGetMouseButton(glfwWindow, GLFW_MOUSE_BUTTON_LEFT)) {
+		if (!imgui_io.WantCaptureMouse && glfwGetMouseButton(glfwWindow, GLFW_MOUSE_BUTTON_LEFT)) {
 			const glm::dvec2 mouseDelta = mousePos - prevMousePos;
 			const glm::dvec2 mouseScreenDelta = -mouseDelta / glm::dvec2(screenW, screenH);
 			camera.rotate(mouseScreenDelta.x, mouseScreenDelta.y);
@@ -287,20 +359,22 @@ int main()
 		prevMousePos = mousePos;
 
 		// camera translation
-		glm::vec3 translation(0);
-		if (glfwGetKey(glfwWindow, GLFW_KEY_W))
-			translation.z -= 1;
-		if (glfwGetKey(glfwWindow, GLFW_KEY_S))
-			translation.z += 1;
-		if (glfwGetKey(glfwWindow, GLFW_KEY_A))
-			translation.x -= 1;
-		if (glfwGetKey(glfwWindow, GLFW_KEY_D))
-			translation.x += 1;
-		if (translation.x != 0 || translation.y != 0 || translation.z != 0)
-			translation = glm::normalize(translation);
-		const float camSpeed = 3;
-		translation *= camSpeed * dt;
-		camera.fps.move(translation);
+		if (!imgui_io.WantCaptureKeyboard) {
+			glm::vec3 translation(0);
+			if (glfwGetKey(glfwWindow, GLFW_KEY_W))
+				translation.z -= 1;
+			if (glfwGetKey(glfwWindow, GLFW_KEY_S))
+				translation.z += 1;
+			if (glfwGetKey(glfwWindow, GLFW_KEY_A))
+				translation.x -= 1;
+			if (glfwGetKey(glfwWindow, GLFW_KEY_D))
+				translation.x += 1;
+			if (translation.x != 0 || translation.y != 0 || translation.z != 0)
+				translation = glm::normalize(translation);
+			const float camSpeed = 3;
+			translation *= camSpeed * dt;
+			camera.fps.move(translation);
+		}
 		
 		auto projMtx = glm::perspectiveZO(glm::radians(60.f), aspectRatio, 0.1f, 1000.f);
 		projMtx[1][1] *= -1;
@@ -313,7 +387,12 @@ int main()
 				.scissor = {0,0, u32(screenW), u32(screenH)}
 			}
 		};
+		mainWorld->update(dt);
 		systems.update(dt);
+
+		imgui_hierarchy(mainWorld);
+		ImGui::ShowDemoWindow();
+
 		tg::draw(viewports);
 	}
 
