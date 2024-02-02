@@ -30,8 +30,9 @@ enum class AttribSemantic {
 	tangent,
 	texcoord_0, //texcoord_1, texcoord_2, texcoord_3,
 	color_0, //color_1, color_2, color_3,
-	joints_0,
-	weights_0,
+	//joints_0,
+	//weights_0,
+    COUNT,
 };
 enum class HasVertexNormalsOrTangents { no, normals, normalsAndTangents, };
 
@@ -97,6 +98,7 @@ struct ImageId : IdU32 {
     bool operator==(ImageId o)const { return id == o.id; }
     ImageInfo getInfo()const;
     vk::Image getHandle()const;
+    void* getInternalHandle()const;
 };
 
 void incRefCount(ImageId id);
@@ -113,6 +115,7 @@ struct ImageViewId : IdU32 {
     bool operator==(ImageViewId o)const { return id == o.id; }
     ImageRC getImage()const;
     vk::ImageView getHandle()const;
+    void* getInternalHandle()const;
 };
 void incRefCount(ImageViewId id);
 void decRefCount(ImageViewId id);
@@ -123,6 +126,26 @@ struct MakeImageView {
 
 };
 ImageViewRC makeImageView(const MakeImageView& info);
+
+// FRAMEBUFFERS
+/*
+struct FramebufferId : IdU32 {
+    bool operator==(FramebufferId o)const { return id == o.id; }
+    //vk::ImageView getHandle()const;
+    void* getInternalHandle()const;
+};
+
+struct MakeFramebuffer {
+    ImageViewRC colorBuffer;
+    ImageViewRC depthBuffer;
+};
+FramebufferId makeFramebuffer(const MakeFramebuffer& info);
+void destroyFramebuffer(FramebufferId id);
+*/
+
+// SAMPLERS
+VkSampler getNearestSampler();
+VkSampler getAnisotropicFilteringSampler(float maxAniso);
 
 // GEOMETRY
 /*struct AttribLocations {
@@ -165,8 +188,27 @@ void incRefCount(GeomId id);
 void decRefCount(GeomId id);
 typedef RefCounted<GeomId> GeomRC;
 
-GeomRC registerGeom(const GeomInfo& info, vk::Buffer buffer);
-GeomRC createGeom(const CreateGeomInfo& info);
+GeomRC geom_create();
+void geom_resetFromBuffer(const GeomRC& h, const GeomInfo& info, vk::Buffer buffer);
+void geom_resetFromInfo(const GeomRC& h, const CreateGeomInfo& info, AABB* aabb = nullptr);
+bool geom_resetFromFile(const GeomRC& h, CStr filePath, AABB* aabb = nullptr);
+bool geom_resetFromMemFile(const GeomRC& h, CSpan<u8> mem, AABB* aabb = nullptr);
+
+inline GeomRC geom_createFromInfo(const CreateGeomInfo& info) {
+    GeomRC h = geom_create();
+    geom_resetFromInfo(h, info);
+    return h;
+};
+
+// keeps track or geoms that have been already loaded, so to avoid loading duplicates
+[[nodiscard]]
+GeomRC geom_getOrLoadFromFile(CStr path, AABB* aabb = nullptr);
+
+// serialize a geom into a memory buffer. The resulting buffer could be used as input to geom_resetFromMemFile. Or could be stored in a file, and loaded with `geom_resetFromFile` or `geom_getOrLoadFromFile`.
+// return the number of written bytes. If data is empty, it returns the needed buffer space
+size_t geom_serializeToMem(const CreateGeomInfo& geomInfo, std::span<u8> data);
+
+bool geom_serializeToFile(const CreateGeomInfo& geomInfo, CStr dstPath);
 
 // MATERIAL
 struct MaterialManagerId : IdU32 {};
@@ -220,6 +262,7 @@ struct PbrMaterialInfo {
     ImageViewRC albedoImageView = ImageViewRC(ImageViewId{});
     ImageViewRC normalImageView = ImageViewRC(ImageViewId{});
     ImageViewRC metallicRoughnessImageView = ImageViewRC(ImageViewId{});
+    float anisotropicFiltering = 1.f;
     bool doubleSided = false;
 };
 
@@ -242,6 +285,7 @@ struct PbrMaterialManager {
 
     std::vector<PbrMaterialInfo> materials_info;
     std::vector<VkDescriptorSet> materials_descSet;
+    //std::vector<u32> materials_customSamplers; // shall be not null when we are not using a sampler from "defaultSamplers". When using custom samplers, we would need to delete the sampler when the material is destroyed
     vk::Buffer uniformBuffer; // a large uniform buffer contaning the data for all materials
     u32 materials_nextFreeEntry = -1;
 
@@ -300,6 +344,7 @@ struct ObjectInfo {
 struct ObjectId : IdU32 {
     IdU32 _renderWorld = {};
 
+    ObjectId() : ObjectId(IdU32(-1), IdU32(-1)) {};
     ObjectId(IdU32 worldId, IdU32 id) : IdU32(id), _renderWorld(worldId) {}
     const RenderWorldId& renderWorld()const { return *(const RenderWorldId*)&_renderWorld; }
     ObjectInfo getInfo()const;
@@ -339,7 +384,7 @@ struct RenderWorld {
     u32 numObjects = 0;
     u32 objects_nextFreeId = u32(-1);
     bool needDefragmentObjects = false;
-    std::vector<std::vector<vk::Buffer>> instancingBuffers; // [swapchainImgInd][viewportInd]
+    std::vector<std::vector<std::vector<vk::Buffer>>> instancingBuffers; // [swapchainImgInd][renderTargetInd][viewportInd]
     std::vector<vk::Buffer> global_uniformBuffers;
     VkDescriptorPool global_descPool;
     VkDescriptorSetLayout global_descSetLayout;
@@ -357,9 +402,53 @@ struct RenderWorld {
 RenderWorldId createRenderWorld();
 void destroyRenderWorld(RenderWorldId id);
 
+
+// RENDER TARGET
+struct RenderTargetParams {
+    u32 w = 128, h = 128;
+    bool resizeUpOnly = true;
+    bool autoRedraw = true;
+};
+
+struct RenderTargetId : IdU32
+{
+    vk::Image getTextureImage();
+    vk::Image getTextureImage(u32 scImgInd);
+    vk::ImageView getTextureImageView();
+    vk::ImageView getTextureImageView(u32 scImgInd);
+    VkImageView getTextureImageViewVk();
+    VkImageView getTextureImageViewVk(u32 scImgInd);
+
+    void requestRedraw();
+    void resize(u32 w, u32 h);
+};
+
+RenderTargetId createRenderTarget(const RenderTargetParams& params);
+void destroyRenderTarget(RenderTargetId id);
+
+u32 getNumSwapchainImages();
+u32 getCurrentSwapchainImageInd();
+
 // draw
-struct RenderWorldViewport { RenderWorldId renderWorld; glm::mat4 viewMtx; glm::mat4 projMtx; vk::Viewport viewport; vk::Rect2d scissor; };
-void draw(CSpan<RenderWorldViewport> viewports);
+struct RenderWorldViewport {
+    RenderWorldId renderWorld;
+    glm::mat4 viewMtx;
+    glm::mat4 projMtx;
+    vk::Viewport viewport;
+    vk::Rect2d scissor;
+    RenderTargetId renderTarget = {};
+};
+struct RenderTargetWorldViewports {
+    RenderTargetId renderTarget;
+    glm::vec4 clearColor = { 0.1f, 0.1f, 0.1f, 0.f };
+    std::vector<RenderWorldViewport> viewports;
+};
+
+void prepareDraw();
+void draw(
+    CSpan<RenderWorldViewport> mainViewports,
+    CSpan<RenderTargetWorldViewports> renderTargetsViewports
+);
 
 // imgui
 void imgui_newFrame();

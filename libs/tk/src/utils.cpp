@@ -4,6 +4,9 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include <glm/gtx/transform.hpp>
+#include <wyhash.h>
+#include <array>
+#include <physfs.h>
 
 namespace tk
 {
@@ -36,8 +39,8 @@ static void handleHeadinPitchBounds(float& heading, float& pitch) {
 
 void FpsCamera::rotate(float deltaScreenX, float deltaScreenY)
 {
-	heading += glm::pi<float>() * deltaScreenX;
-	pitch += glm::pi<float>() * deltaScreenY;
+	heading -= glm::pi<float>() * deltaScreenX;
+	pitch -= glm::pi<float>() * deltaScreenY;
 	handleHeadinPitchBounds(heading, pitch);
 }
 
@@ -74,8 +77,8 @@ void OrbitCamera::pan(glm::vec2 deltaScreenXY, bool lockedY)
 
 void OrbitCamera::rotate(float deltaScreenX, float deltaScreenY)
 {
-	heading += glm::pi<float>() * deltaScreenX;
-	pitch += glm::pi<float>() * deltaScreenY;
+	heading -= glm::pi<float>() * deltaScreenX;
+	pitch -= glm::pi<float>() * deltaScreenY;
 	handleHeadinPitchBounds(heading, pitch);
 }
 
@@ -120,17 +123,82 @@ glm::mat4 PerspectiveCamera::projMtx_vk(float aspectRatio)const
 	return M;
 }
 
-std::string loadTextFile(CStr path)
+bool loadTextFile(std::string& str, CStr path)
 {
-	FILE* file = fopen(path, "r");
+	if (0) { // using the C API
+		FILE* file = fopen(path, "r");
+		if (!file)
+			return false;
+		fseek(file, 0, SEEK_END);
+		auto n = ftell(file);
+		fseek(file, 0, SEEK_SET);
+		str.resize(n);
+		fread(str.data(), 1, n, file);
+	}
+	else { // using PhysicsFS
+		auto file = PHYSFS_openRead(path);
+		if (!file)
+			return false;
+		auto len = PHYSFS_fileLength(file);
+		str.resize(len);
+		PHYSFS_readBytes(file, str.data(), len);
+	}
+	return true;
+}
+
+LoadedBinaryFile loadBinaryFile(CStr path)
+{
+	auto* file = PHYSFS_openRead(path);
 	if (!file)
-		return "";
-	fseek(file, 0, SEEK_END);
-	auto n = ftell(file);
-	fseek(file, 0, SEEK_SET);
-	std::string res(n, ' ');
-	fread(res.data(), 1, n, file);
-	return res;
+		return { 0, nullptr };
+	defer(PHYSFS_close(file););
+	const auto fileLen = PHYSFS_fileLength(file);
+	u8* fileData = new u8[fileLen];
+	if (PHYSFS_readBytes(file, fileData, fileLen) < fileLen) {
+		delete[] fileData;
+		return { 0, nullptr };
+	}
+	return { size_t(fileLen), fileData };
+}
+
+static std::array<u64, 4> k_hashingSecret = []() {
+	std::array<u64, 4> sec;
+	make_secret(42382348, sec.data());
+	return sec;
+}();
+
+static u64 hash(std::string_view s) {
+	return wyhash(s.data(), s.size(), 524354325, k_hashingSecret.data());
+}
+
+// -- PathBag --
+
+u32 PathBag::getEntry(std::string_view path)const
+{
+	const u64 h = hash(path);
+	if (auto it = hashToEntry.find(h); it == hashToEntry.end())
+		return u32(-1);
+	else {
+		assert(path == paths[it->second]);
+		return it->second;
+	}
+}
+void PathBag::addPath(std::string_view path, u32 entry)
+{
+	assert(!path.empty());
+	assert(getEntry(path) == u32(-1));
+	const size_t newSize = glm::max<size_t>(paths.size(), entry + 1);
+	paths.resize(newSize);
+	paths[entry] = path;
+	const u64 h = hash(path);
+	hashToEntry[h] = entry;
+}
+void PathBag::deleteEntry(u32 entry)
+{
+	assert(!paths[entry].empty());
+	const u64 h = hash(paths[entry]);
+	paths[entry] = {};
+	hashToEntry.erase(h);
 }
 
 }

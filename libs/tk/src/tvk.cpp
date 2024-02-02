@@ -328,6 +328,7 @@ Image Device::createImage(const ImageInfo& info)
 	assert(info.size.width > 0 && info.size.height > 0 && info.size.depth > 0 && info.size.numMips > 0);
 	assert(!(info.dimensions == 1 && info.size.height != 1));
 	assert(has(k_possibleNumSampleValues, info.numSamples));
+	assert(info.layout == ImageLayout::undefined || info.layout == ImageLayout::preinitialized);
 
 	const VkImageUsageFlags usage = 0
 		| (info.usage.transfer_src ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0)
@@ -501,7 +502,7 @@ VkSampler Device::createSampler(const SamplerInfo& info)
 	return sampler;
 }
 
-VkSampler Device::createSampler(Filter minFilter, Filter magFilter, SamplerMipmapMode mipmapMode, SamplerAddressMode addressMode)
+VkSampler Device::createSampler(Filter minFilter, Filter magFilter, SamplerMipmapMode mipmapMode, SamplerAddressMode addressMode, float maxAnisotropy)
 {
 	const SamplerInfo info = {
 		.minFilter = minFilter,
@@ -510,6 +511,8 @@ VkSampler Device::createSampler(Filter minFilter, Filter magFilter, SamplerMipma
 		.addressModeX = addressMode,
 		.addressModeY = addressMode,
 		.addressModeZ = addressMode,
+		.anisotropyEnable = maxAnisotropy > 1.f,
+		.maxAnisotropy = maxAnisotropy,
 	};
 	return createSampler(info);
 }
@@ -1521,6 +1524,59 @@ void CmdBuffer::cmd_pipelineBarrier_imagesToShaderReadLayout(Device& device, CSp
 	cmd_pipelineBarrier(pb);
 }
 
+/*
+void CmdBuffer::cmd_pipelineBarrier_images_colorAttachment_to_shaderRead(Device& device, CSpan<Image> images)
+{
+	std::vector<ImageBarrier> barriers(images.size());
+	for (size_t i = 0; i < images.size(); i++) {
+		const auto& imgInfo = device.getInfo(images[i]);
+		barriers[i] = {
+			.srcAccess = AccessFlags::colorAtachmentWrite,
+			.dstAccess = AccessFlags::shaderRead,
+			.srcLayout = ImageLayout::colorAttachment,
+			.dstLayout = ImageLayout::shaderReadOnly,
+			.image = device.getVkHandle(images[i]),
+			.subresourceRange = {
+				.numMips = imgInfo.size.numMips,
+				.numLayers = imgInfo.size.numLayers,
+			},
+		};
+	}
+	const PipelineBarrier pb = {
+		.srcStages = PipelineStages::colorAttachmentOutput,
+		.dstStages = PipelineStages::fragmentShader,
+		.imageBarriers = barriers,
+	};
+	cmd_pipelineBarrier(pb);
+}
+*/
+
+/*
+void CmdBuffer::cmd_pipelineBarrier_imagesToColorAttachment(Device& device, CSpan<Image> images)
+{
+	std::vector<ImageBarrier> barriers(images.size());
+	for (size_t i = 0; i < images.size(); i++) {
+		const auto& imgInfo = device.getInfo(images[i]);
+		barriers[i] = {
+			.srcAccess = AccessFlags::none,
+			.dstAccess = AccessFlags::colorAtachmentWrite,
+			.srcLayout = ImageLayout::undefined,
+			.dstLayout = ImageLayout::colorAttachment,
+			.image = device.getVkHandle(images[i]),
+			.subresourceRange = {
+				.numMips = imgInfo.size.numMips,
+				.numLayers = imgInfo.size.numLayers,
+			},
+		};
+	}
+	const PipelineBarrier pb = {
+		.srcStages = PipelineStages::none,
+		.dstStages = PipelineStages::colorAttachmentOutput,
+		.imageBarriers = barriers,
+	};
+	cmd_pipelineBarrier(pb);
+}*/
+
 /*void CmdBuffer::cmd_pipelineBarrier_imagesToDepthAttachmentLayout(Device& device, CSpan<Image> images)
 {
 	std::vector<ImageBarrier> barriers(images.size());
@@ -1648,6 +1704,7 @@ void getPhysicalDeviceInfos(VkInstance instance, std::vector<PhysicalDeviceInfo>
 	infos.resize(numDevices);
 	for (u32 i = 0; i < numDevices; i++) {
 		infos[i].handle = physicalDevices[i];
+		vkGetPhysicalDeviceFeatures(physicalDevices[i], &infos[i].features);
 		vkGetPhysicalDeviceProperties(physicalDevices[i], &infos[i].props);
 		vkGetPhysicalDeviceMemoryProperties(physicalDevices[i], &infos[i].memProps);
 
@@ -1751,12 +1808,17 @@ VkResult createDevice(Device& device, VkInstance instance, const PhysicalDeviceI
 		};
 	}
 
+	const VkPhysicalDeviceFeatures features = {
+		.samplerAnisotropy = VK_TRUE,
+	};
+
 	const VkDeviceCreateInfo info = {
 		.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 		.queueCreateInfoCount = numFamilies,
 		.pQueueCreateInfos = queuesInfosVk,
 		.enabledExtensionCount = u32(extensions.size()),
 		.ppEnabledExtensionNames = extensions.data(),
+		.pEnabledFeatures = &features,
 	};
 	VkResult vkRes = vkCreateDevice(device.physicalDevice.handle, &info, nullptr, &device.device);
 	if (vkRes != VK_SUCCESS)
@@ -1862,6 +1924,7 @@ VkResult createSwapchainSyncHelper(SwapchainSyncHelper& o, VkSurfaceKHR surface,
 			device.destroySemaphore(o.semaphore_drawFinished[i]);
 			device.destroyFence(o.fence_drawFinished[i]);
 		}
+		device.destroySemaphore(o.semaphore_imageAvailable[o.numImages]);
 	}
 	
 	VkResult vkRes = createSwapchain(o, surface, device, options);
@@ -1872,13 +1935,14 @@ VkResult createSwapchainSyncHelper(SwapchainSyncHelper& o, VkSurfaceKHR surface,
 		o.semaphore_drawFinished[i] = device.createSemaphore();
 		o.fence_drawFinished[i] = device.createFence(true);
 	}
+	o.semaphore_imageAvailable[o.numImages] = device.createSemaphore();
 
 	return vkRes;
 }
 
 void SwapchainSyncHelper::acquireNextImage(Device& device)
 {
-	ASSERT_VKRES(vkAcquireNextImageKHR(device.device, swapchain, u64(-1), semaphore_imageAvailable[frameInd], VK_NULL_HANDLE, &imgInd));
+	ASSERT_VKRES(vkAcquireNextImageKHR(device.device, swapchain, u64(-1), semaphore_imageAvailable[imageAvailableSemaphoreInd], VK_NULL_HANDLE, &imgInd));
 }
 
 void SwapchainSyncHelper::waitCanStartFrame(Device& device)
@@ -1902,7 +1966,7 @@ void SwapchainSyncHelper::present(VkQueue queue)
 	};
 	vkQueuePresentKHR(queue, &info);
 	ASSERT_VKRES(vkRes);
-	frameInd = (frameInd + 1) % numImages;
+	imageAvailableSemaphoreInd = (imageAvailableSemaphoreInd + 1) % (numImages + 1);
 }
 
 bool formatIsColor(Format format)

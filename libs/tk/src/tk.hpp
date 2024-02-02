@@ -7,6 +7,8 @@
 
 namespace tk {
 
+bool init(CStr argv0, CStr rootshadersPath = "shaders");
+
 struct World;
 typedef u16 ComponentTypeU16;
 typedef u16 EntityTypeU16;
@@ -64,14 +66,14 @@ struct EntityFactory
     typedef void (*ReleaseEntitiesFn)(EntityFactory* self, CSpan<u32> entitiesIndInWorld);
     typedef void* (*AccessComponentFn)(EntityFactory* self, u32 entityIndInFactory, ComponentTypeU16 componentType);
 
-    World& world;
+    WorldId world;
     std::string entityTypeName;
     std::vector<ComponentTypeU16> componentTypes;
     //AllocEntitiesFn allocEntitiesFn;
     ReleaseEntitiesFn releaseEntitiesFn;
     AccessComponentFn accessComponentByIndFn;
 
-    EntityFactory(World& world, std::string_view entityTypeName, CSpan<ComponentTypeU16> componentTypes,
+    EntityFactory(WorldId world, std::string_view entityTypeName, CSpan<ComponentTypeU16> componentTypes,
         /*AllocEntitiesFn allocEntitiesFn,*/ ReleaseEntitiesFn releaseEntitiesFn, AccessComponentFn accessComponentFn
     )
         : world(world), entityTypeName(entityTypeName),
@@ -150,7 +152,7 @@ struct EntityFactory_Node : EntityFactory
     std::vector<Component_Rotation3d> components_rotation3d; // [indInFactory]
     std::vector<Component_Scale3d> components_scale3d; // [indInFactory]
 
-    EntityFactory_Node(World& world, System_Render& system_render)
+    EntityFactory_Node(WorldId world, System_Render& system_render)
         : EntityFactory(world, "Renderable3d", {}, s_releaseEntitiesFn, s_accessComponentByIndFn)
     {}
 
@@ -192,10 +194,12 @@ struct EntityFactory_Renderable3d : EntityFactory
     std::unordered_map<u32, u32> mesh_to_gfxObjectInd;
     std::unordered_map<u64, u32> geomAndMaterial_to_gfxObjectInd;
 
-    EntityFactory_Renderable3d(World& world, System_Render& system_render)
+    EntityFactory_Renderable3d(WorldId world, System_Render& system_render)
         : EntityFactory(world, "Renderable3d", k_componentTypes, s_releaseEntitiesFn, s_accessComponentByIndFn)
         , system_render(system_render)
     {}
+
+    ~EntityFactory_Renderable3d() override;
 
     struct Create {
         glm::vec3 position = glm::vec3(0);
@@ -247,7 +251,7 @@ struct SystemId_Render {
 
 struct DefaultBasicWorldSystems
 {
-    System_Render& system_render;
+    System_Render* system_render = nullptr;
 
     void update(float dt);
     void destroy();
@@ -262,7 +266,7 @@ struct World
     std::vector<EntityTypeU16> entities_type; // [entity.ind]
     std::vector<u32> entities_indInFactory; // [entity.ind]
 #ifndef NDEBUG
-    std::vector<u32> entities_counter; // [entity.ind] keep track of how many times the entry has been reused. Useful for verifying if a EntityId refers to and old released entity
+    std::vector<u32> entities_counter; // [entity.ind] keep track of how many times the entry has been reused. Useful for verifying if a EntityId refers to an old released entity
 #endif
 
     // entity hierarchy
@@ -283,6 +287,11 @@ struct World
 
 
     World();
+    World(const World& o) = delete;
+    World& operator=(const World& o) = delete;
+    World(World&& o) = default;
+    World& operator=(World&& o) = default;
+    ~World();
 
     WorldId id()const;
 
@@ -322,7 +331,7 @@ struct World
         auto typeInd = EF::s_type();
         if (typeInd < entityFactories.size() && entityFactories[typeInd] != nullptr)
             return typeInd; // already registered
-        return registerEntityFactory<EF>( new EF(*this, std::forward<Args>(args)...) );
+        return registerEntityFactory<EF>( new EF(id(), std::forward<Args>(args)...));
     }
 
     template <typename EF>
@@ -335,5 +344,58 @@ struct World
 };
 
 WorldId createWorld();
+void destroyWorld(WorldId worldId);
+
+// --- PROJECT ---
+struct Project
+{
+    enum class FileType {
+        folder,
+        geom,
+        material,
+        mesh,
+        entity,
+        scene,
+    };
+    struct File {
+        u32 id = u32(-1);
+        bool isValid()const { return id != u32(-1); }
+    };
+
+    std::vector<std::string> files_name;
+    std::vector<FileType> files_type;
+    std::vector<u32> files_parent;
+    std::vector<u32> files_firstChild;
+    std::vector<u32> files_nextSibling;
+    u32 files_nextFreeEntry = u32(-1);
+
+    std::vector<u32> toSpecificInd; // convert from File::ind to the ind for the specific file type ("specific" ind would be, for example, the ind for accessing geoms_data)
+
+    std::vector<std::vector<u8>> geoms_data;
+    std::vector<tg::GeomInfo> geoms_info;
+
+    Project();
+
+    File firstChild(File folder);
+    File nextSibling(File fileOrFolder);
+    File findChildWithName(File folder, std::string_view name);
+    FileType getType(File file);
+    bool isFolder(File file);
+
+    File addChildFile(File folder, std::string name, FileType type);
+    void setFileName(File fileOrFolder, std::string name);
+
+    void deleteFile(File file);
+    void deleteFolder(File folder, bool recursive = false);
+    void deleteFileOrFolder(File fileOrFolder, bool recursive = false);
+
+    void setGeomFile(File geomFile, CSpan<u8> data, const tg::GeomInfo& info);
+    void setGeomFile(File geomFile, tg::CreateGeomInfo createInfo);
+
+    void importGltf(File destFolder, CStr gltfPath);
+
+    File _allocFileH();
+    void _releaseFileH(File file);
+};
 
 }

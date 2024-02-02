@@ -2,8 +2,31 @@
 
 #include <glm/gtx/quaternion.hpp>
 #include <imgui.h>
+#include <physfs.h>
 
 namespace tk {
+
+bool init(CStr argv0, CStr rootShadersPath)
+{
+    if (!PHYSFS_init(argv0)) {
+        printf("PHYSFS_init() failed!\n  reason: %s.\n", PHYSFS_getLastError());
+        return false;
+    }
+
+    if (!PHYSFS_mount("data", "/", 0)) {
+        printf("could not mount data dir\n");
+    }
+
+    if (!PHYSFS_mount(rootShadersPath, "/shaders", 0)) {
+        printf("could not mount shaders dir\n");
+    }
+    tg::getShaderCompiler().rootShadersPath = "shaders";
+
+    if (!PHYSFS_setWriteDir("data")) {
+        printf("could not set the write dir\n");
+    }
+    return true;
+}
 
 // -- COMPONENTS --
 std::vector<std::string> ComponentsDB::componentTypesNames;
@@ -11,6 +34,13 @@ std::vector<std::string> ComponentsDB::componentTypesNames;
 // -- ENTITIES --
 
 std::vector<std::string> EntityFactory::entityTypesNames;
+
+EntityFactory_Renderable3d::~EntityFactory_Renderable3d()
+{
+    for (gfx::ObjectId o : gfxObjects) {
+        system_render.RW.destroyObject(o);
+    }
+}
 
 EntityId EntityFactory_Renderable3d::create(const Create& info)
 {
@@ -69,40 +99,17 @@ EntityId EntityFactory_Renderable3d::create(const Create& info)
     }
     components_renderableMesh[e] = { gfxObjectInd, instanceInd };
 
-    auto id = world._createEntity(s_type(), e);
+    auto id = world->_createEntity(s_type(), e);
     indsInWorld[e] = id.ind;
     return id;
 }
-
-#if 0
-void EntityFactory_Renderable3d::s_allocEntitiesFn(EntityFactory* self, std::span<EntityId> entities, CSpan<const u8*> data)
-{
-    auto& factory = *(EntityFactory_Renderable3d*)self;
-    const u32 N = u32(entities.size());
-    u32 i;
-    for (i = 0; i < N && factory.components_nextFreeEntry != u32(-1); i++) {
-        const u32 nextNextEntry = *(const u32*)&factory.components_position3d[factory.components_nextFreeEntry];
-        // EF.components_position3d[EF.nextFreeEntry] = { glm::vec3() };
-        // EF.components_gfxObject[EF.nextFreeEntry] = { .gfxObject = self->world. };
-        // EF.matrices[EF.nextFreeEntry] = {}
-        factory.components_nextFreeEntry = nextNextEntry;
-    }
-
-    if (size_t neededAdditionalSlots = size_t(N - 1); neededAdditionalSlots > 0) {
-        const size_t newSize = factory.components_position3d.size() + neededAdditionalSlots;
-        factory.components_position3d.resize(newSize);
-        factory.components_rotation3d.resize(newSize);
-        factory.components_gfxObject.resize(newSize);
-    }
-}
-#endif
 
 void EntityFactory_Renderable3d::s_releaseEntitiesFn(EntityFactory* self, CSpan<u32> entitiesIndInWorld)
 {
     auto& W = self->world;
     auto& factory = *(EntityFactory_Renderable3d*)self;
     auto RW = factory.system_render.RW;
-    auto& indsInFactory = W.entities_indInFactory;
+    auto& indsInFactory = W->entities_indInFactory;
     for (u32 indInWorld : entitiesIndInWorld) {
         const u32 indInFactory = indsInFactory[indInWorld];
         factory.indsInWorld[indInFactory] = u32(-1); // mark the entries to delete
@@ -120,7 +127,7 @@ void EntityFactory_Renderable3d::s_releaseEntitiesFn(EntityFactory* self, CSpan<
             if (indInWorldJ == u32(-1))
                 continue;
 
-            W.entities_indInFactory[indInWorldJ] = i;
+            W->entities_indInFactory[indInWorldJ] = i;
             factory.indsInWorld[i] = factory.indsInWorld[j];
             factory.components_position3d[i] = factory.components_position3d[j];
             factory.components_rotation3d[i] = factory.components_rotation3d[j];
@@ -225,7 +232,7 @@ void System_Render::update(float dt)
 
 void DefaultBasicWorldSystems::update(float dt)
 {
-    system_render.update(dt);
+    system_render->update(dt);
 }
 
 void DefaultBasicWorldSystems::destroy()
@@ -235,6 +242,7 @@ void DefaultBasicWorldSystems::destroy()
 
 // -- WORLD --
 static std::vector<World> g_worlds;
+static u16 g_worlds_nextFreeEntry = u16(-1);
 
 World::World()
 {
@@ -244,6 +252,13 @@ World::World()
     cachedEntityMatrices_isValid.push_back(true);
     // entity type 0 has no components
     entitiesComponents.push_back({});
+}
+
+World::~World()
+{
+    for (auto* factory : entityFactories) {
+        delete factory;
+    }
 }
 
 WorldId World::id()const
@@ -491,14 +506,27 @@ DefaultBasicWorldSystems World::createDefaultBasicSystems()
     EntityTypeU16 entityType_renderable3d = createAndRegisterEntityFactory<EntityFactory_Renderable3d>(*system_render);
 
     return DefaultBasicWorldSystems {
-        *system_render
+        system_render
     };
 }
 
 WorldId createWorld()
 {
+    if (g_worlds_nextFreeEntry != u16(-1)) {
+        g_worlds[g_worlds_nextFreeEntry].entities_nextFreeEntry = u32(-1);
+        return WorldId{ g_worlds_nextFreeEntry };
+    }
+
     g_worlds.emplace_back();
     return WorldId{ u16(g_worlds.size() - 1) };
+}
+
+void destroyWorld(WorldId worldId)
+{
+    auto& W = g_worlds[worldId.ind];
+    W = {};
+    W.entities_nextFreeEntry = g_worlds_nextFreeEntry;
+    g_worlds_nextFreeEntry = worldId.ind;
 }
 
 World* WorldId::operator->()
@@ -531,6 +559,173 @@ EntityId EntityId::nextSibling()const
 void EntityId::destroy()
 {
     world->addEntitiesToDelete({ &ind, 1 });
+}
+
+// --- PROJECT ---
+Project::Project()
+{
+    // root folder
+    files_name.push_back("");
+    files_type.push_back(FileType::folder);
+    files_parent.push_back(u32(-1));
+    files_firstChild.push_back(u32(-1));
+    files_nextSibling.push_back(u32(-1));
+}
+
+Project::File Project::firstChild(File folder)
+{
+    assert(isFolder(folder));
+    return File{files_firstChild[folder.id]};
+}
+
+Project::FileType Project::getType(File file)
+{
+    return files_type[file.id];
+}
+
+bool Project::isFolder(File file)
+{
+    return files_type[file.id] == FileType::folder;
+}
+
+Project::File Project::nextSibling(File fileOrFolder)
+{
+    return File{ files_nextSibling[fileOrFolder.id] };
+}
+
+Project::File Project::findChildWithName(File folder, std::string_view name)
+{
+    for (auto child = firstChild(folder); child.isValid(); child = nextSibling(child)) {
+        if (files_name[child.id] == name)
+            return child;
+    }
+    return File{};
+}
+
+Project::File Project::addChildFile(File folder, std::string name, FileType type)
+{
+    assert(isFolder(folder));
+    assert(!findChildWithName(folder, name).isValid());
+    const File file = _allocFileH();
+    files_name[file.id] = std::move(name);
+    files_type[file.id] = type;
+    files_parent[file.id] = folder.id;
+    files_nextSibling[file.id] = files_firstChild[folder.id];
+    files_firstChild[folder.id] = file.id;
+    if (type == FileType::geom) {
+
+    }
+    return file;
+}
+
+void Project::setFileName(File fileOrFolder, std::string name)
+{
+    files_name[fileOrFolder.id] = std::move(name);
+}
+
+void Project::deleteFile(File file)
+{
+    const FileType type = files_type[file.id];
+    assert(!isFolder(file));
+    if (type == FileType::geom) {
+
+    }
+    //else if (type == FileType::) {}
+    _releaseFileH(file);
+}
+
+void Project::deleteFolder(File folder, bool recursive)
+{
+    assert(isFolder(folder));
+    if (recursive) {
+        for (auto child = firstChild(folder); child.isValid(); child = nextSibling(child)) {
+            if (isFolder(child))
+                deleteFolder(child, true);
+            else
+                deleteFile(child);
+        }
+    }
+
+    _releaseFileH(folder);
+}
+
+void Project::deleteFileOrFolder(File fileOrFolder, bool recursive)
+{
+    if (isFolder(fileOrFolder))
+        deleteFolder(fileOrFolder);
+    else
+        deleteFile(fileOrFolder);
+}
+
+void Project::setGeomFile(File geomFile, CSpan<u8> data, const tg::GeomInfo& info)
+{
+    assert(getType(geomFile) == FileType::geom);
+    const u32 ind = toSpecificInd[geomFile.id];
+    geoms_data[ind].assign(data.begin(), data.end());
+    geoms_info[ind] = info;
+}
+
+void Project::setGeomFile(File geomFile, tg::CreateGeomInfo createInfo)
+{
+#if 0
+    assert(getType(geomFile) == FileType::geom);
+    const u32 ind = toSpecificInd[geomFile.id];
+    u32 offset = 0;
+    geoms_data[ind].assign(createInfo.positions.begin(), createInfo.positions.end());
+    if(createInfo.normals.size()) {
+        geoms_info[ind].attribOffset_normals = offset;
+        geoms_data[ind].insert(geoms_data[ind].begin(), createInfo.normals.begin(), createInfo.normals.end());
+        offset += createInfo.normals.size();
+    }
+    if (createInfo.tangents.size()) {
+        geoms_info[ind].attribOffset_tangents = offset;
+        geoms_data[ind].insert(geoms_data[ind].begin(), createInfo.tangents.begin(), createInfo.tangents.end());
+        offset += createInfo.tangents.size();
+    }
+    if (createInfo.texCoords.size()) {
+        geoms_info[ind].attribOffset_texCoords = offset;
+        geoms_data[ind].insert(geoms_data[ind].begin(), createInfo.texCoords.begin(), createInfo.texCoords.end());
+        offset += createInfo.texCoords.size();
+    }
+    if (createInfo.colors.size()) {
+        geoms_info[ind].attribOffset_colors = offset;
+        geoms_data[ind].insert(geoms_data[ind].begin(), createInfo.colors.begin(), createInfo.colors.end());
+        offset += createInfo.colors.size();
+    }
+    if (createInfo.indices.size()) {
+        geoms_info[ind].attribOffset_indices = offset;
+        geoms_data[ind].insert(geoms_data[ind].begin(), createInfo.indices.begin(), createInfo.indices.end());
+        offset += createInfo.indices.size();
+    }
+    geoms_data[ind].assign(createInfo.positions.begin(), data.end());
+    geoms_info[ind] = info;
+#endif
+}
+
+Project::File Project::_allocFileH()
+{
+    if (files_nextFreeEntry == u32(-1)) {
+        const File file{files_name.size()};
+        files_name.emplace_back();
+        files_type.emplace_back();
+        files_parent.emplace_back();
+        files_firstChild.emplace_back();
+        files_nextSibling.emplace_back();
+        return file;
+    }
+    else {
+        const File file{ files_nextFreeEntry };
+        files_nextFreeEntry = files_nextSibling[files_nextFreeEntry];
+        return file;
+    }
+}
+
+void Project::_releaseFileH(File file)
+{
+    assert(file.isValid());
+    files_name[file.id] = {}; // makes debugging easier and might help release string memory
+    files_nextSibling[file.id] = files_nextFreeEntry;
+    files_nextFreeEntry = file.id;
 }
 
 }

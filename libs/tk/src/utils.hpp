@@ -10,6 +10,7 @@
 #include <glm/gtx/quaternion.hpp>
 #include <filesystem>
 #include <utility>
+#include <unordered_map>
 
 namespace tk
 {
@@ -48,6 +49,17 @@ struct AABB {
     glm::vec3 center()const { return 0.5f * (min + max); }
     glm::vec3 size()const { return max - min; }
 };
+inline AABB pointCloudToAABB(CSpan<glm::vec3> positions) {
+    AABB b{};
+    if (positions.size()) {
+        b.min = b.max = positions[0];
+        for (size_t i = 0; i < positions.size(); i++) {
+            b.min = glm::min(b.min, positions[i]);
+            b.max = glm::max(b.max, positions[i]);
+        }
+    }
+    return b;
+}
 
 struct FpsCamera {
     glm::vec3 position = { 0, 0, 0 };
@@ -117,7 +129,60 @@ auto make_vector(const T& t, const Ts&... ts) {
     return res;
 }
 
-std::string loadTextFile(CStr path);
+struct DumbHash { u64 operator()(u64 x)const { return x; } };
+
+bool loadTextFile(std::string& str, CStr path);
+
+struct LoadedBinaryFile {
+    size_t size = 0;
+    u8* data = nullptr;
+};
+ LoadedBinaryFile loadBinaryFile(CStr path);
+
+struct PathBag
+{
+    std::vector<std::string> paths;
+    std::unordered_map<u64, u32, DumbHash> hashToEntry;
+
+    u32 getEntry(std::string_view path)const;
+    void addPath(std::string_view path, u32 entry);
+    void deleteEntry(u32 entry);
+};
+
+template <typename T>
+struct EntriesArray
+{
+    std::vector<T> entries;
+    u32 nextFreeEntry = u32(-1);
+    static_assert(sizeof(T) >= sizeof(u32));
+
+    u32 alloc()
+    {
+        if (nextFreeEntry != u32(-1))
+            return nextFreeEntry;
+
+        const u32 id = entries.size();
+        entries.emplace_back();
+        return id;
+    }
+
+    void free(u32 id)
+    {
+        assert(id < entries.size());
+
+        *(u32*)(&entries[id]) = nextFreeEntry;
+        nextFreeEntry = id;
+    }
+
+    T& operator[](u32 id)
+    {
+        return entries[id];
+    }
+    const T& operator[](u32 id)const
+    {
+        return entries[id];
+    }
+};
 
 // computes the next power of two, unless it's already a power of two
 template <typename T>

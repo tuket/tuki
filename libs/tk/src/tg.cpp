@@ -4,6 +4,7 @@
 #include "tvk.hpp"
 #include "shader_compiler.hpp"
 #include <format>
+#include <physfs.h>
 
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
@@ -26,6 +27,20 @@ struct ImageStagingProc {
 	bool generateMipChain : 1;
 };
 
+struct RenderTarget {
+	vk::Image colorBuffer[MAX_SWAPCHAIN_IMAGES];
+	vk::Image depthBuffer[MAX_SWAPCHAIN_IMAGES];
+	vk::ImageView colorBufferView[MAX_SWAPCHAIN_IMAGES];
+	vk::ImageView depthBufferView[MAX_SWAPCHAIN_IMAGES];
+	VkFramebuffer framebuffer[MAX_SWAPCHAIN_IMAGES];
+	u32 w, h;
+	bool autoRedraw, needRedraw;
+};
+
+static constexpr u32 k_anisotropicFractionResolution = 4;
+static constexpr u32 k_maxAnisotropicFiltering = 16; // https://vulkan.gpuinfo.org/displaydevicelimit.php?name=maxSamplerAnisotropy&platform=all
+static constexpr u32 k_anisotropicFilteringNumDiscreteValues = (k_maxAnisotropicFiltering - 1) * k_anisotropicFractionResolution + 1;
+
 struct RenderUniverse
 {
 	u32 queueFamily;
@@ -43,6 +58,7 @@ struct RenderUniverse
 	vk::ImageView depthStencilImageViews[MAX_SWAPCHAIN_IMAGES];
 	VkFramebuffer framebuffers[MAX_SWAPCHAIN_IMAGES];
 	VkRenderPass renderPass;
+	VkRenderPass renderPassOffscreen;
 	VkDescriptorSetLayout globalDescSetLayout;
 
 	// staging buffers
@@ -57,6 +73,7 @@ struct RenderUniverse
 	std::vector<vk::Buffer> buffersToDestroy[MAX_SWAPCHAIN_IMAGES];
 	std::vector<vk::Image> imagesToDestroy[MAX_SWAPCHAIN_IMAGES];
 	std::vector<vk::ImageView> imageViewsToDestroy[MAX_SWAPCHAIN_IMAGES];
+	std::vector<VkFramebuffer> framebuffersToDestroy[MAX_SWAPCHAIN_IMAGES];
 
 	// images
 	std::vector<vk::Image> images_vk;
@@ -78,6 +95,7 @@ struct RenderUniverse
 	std::vector<u32> geoms_refCount;
 	std::vector<vk::Buffer> geoms_buffer;
 	u32 geoms_nextFreeEntry = u32(-1);
+	PathBag geoms_pathBag;
 
 	// materials
 	std::vector<MaterialManager> materialManagers;
@@ -87,13 +105,20 @@ struct RenderUniverse
 	std::vector<MeshInfo> meshes_info;
 	std::vector<u32> meshes_refCount;
 	u32 meshes_nextFreeEntry = u32(-1);
+
+	// render targets
+	tk::EntriesArray<RenderTarget> renderTargets;
 	
 	VkCommandPool cmdPool;
 	vk::CmdBuffer cmdBuffers_staging[MAX_SWAPCHAIN_IMAGES + 1]; // we have one extra buffer because we could have a staging cmd buffer "in use" but we still want to record staging cmd for future frames
 	u32 cmdBuffers_staging_ind = 0; // that's why we need a separate index for it
 	vk::CmdBuffer cmdBuffers_draw[MAX_SWAPCHAIN_IMAGES];
 
-	VkSampler defaultSampler;
+	struct DefaultSamplers {
+		// anisotropic can be float, but we will use discrete values [0]=1.0, [1]=1.25, ..., [4]=2.0, [8]=3.0, [15*4]=16.0
+		VkSampler nearest;
+		VkSampler mipmap_anisotropic[k_anisotropicFilteringNumDiscreteValues] = {VK_NULL_HANDLE};
+	} defaultSamplers = {};
 
 	// RenderWorlds
 	std::vector<RenderWorld> renderWorlds;
@@ -106,6 +131,7 @@ struct RenderUniverse
 	} imgui;
 
 	~RenderUniverse() {
+		device.waitIdle();
 		printf("~RenderUniverse()\n");
 	}
 };
@@ -196,6 +222,7 @@ static void stageDataToImage(vk::Image img, CSpan<u8> data)
 // --- IMAGES ---
 ImageInfo ImageId::getInfo()const { return RU.images_info[id]; }
 vk::Image ImageId::getHandle()const { return RU.images_vk[id]; }
+void* ImageId::getInternalHandle()const { return RU.device.getVkHandle(getHandle()); }
 
 static u32 acquireImageEntry()
 {
@@ -222,6 +249,11 @@ static void releaseImageEntry(u32 e)
 	// TODO: do some safety check in debug mode for detecting double-free
 }
 
+static void deferredDestroy_image(vk::Image id)
+{
+	RU.imagesToDestroy[RU.swapchain.imgInd].push_back(id);
+}
+
 void incRefCount(ImageId id)
 {
 	if (id == ImageId{})
@@ -235,7 +267,7 @@ void decRefCount(ImageId id)
 	auto& c = RU.images_refCount[id.id];
 	c--;
 	if (c == 0) {
-		RU.imagesToDestroy[RU.swapchain.imgInd].push_back(RU.images_vk[id.id]);
+		deferredDestroy_image(RU.images_vk[id.id]);
 		releaseImageEntry(id.id);
 	}
 }
@@ -264,10 +296,14 @@ ImageRC getOrLoadImage(Path path, bool srgb, bool generateMipChain)
 	if (it != RU.images_nameToId.end())
 		return ImageRC{ it->second };
 
+	auto fileData = tk::loadBinaryFile(path.string().c_str());
+	if(fileData.data == nullptr)
+		return ImageRC({});
+
 	int w, h, nc;
-	u8* imgData = stbi_load(path.string().c_str(), &w, &h, &nc, 4);
+	u8* imgData = stbi_load_from_memory(fileData.data, fileData.size, &w, &h, &nc, 4);
 	if(imgData == nullptr)
-		return ImageRC(ImageId{});
+		return ImageRC({});
 
 	assert(w > 0 && h > 0 && imgData != nullptr);
 	const u8 numMips = calcNumMipsFromDimensions(u32(w), u32(h));
@@ -305,6 +341,7 @@ ImageRC getOrLoadImage(Path path, bool srgb, bool generateMipChain)
 		.generateMipChain = generateMipChain
 	});
 
+	RU.images_nameToId[path] = imgId;
 	return ImageRC{imgId};
 }
 
@@ -319,6 +356,11 @@ vk::ImageView ImageViewId::getHandle()const
 {
 	assert(isValid());
 	return RU.imageViews_vk[id];
+}
+
+void* ImageViewId::getInternalHandle()const
+{
+	return RU.device.getVkHandle(getHandle());
 }
 
 static u32 acquireImageViewEntry()
@@ -346,6 +388,11 @@ static void releaseImageViewEntry(u32 e)
 	// TODO: do some safety check in debug mode for detecting double-free
 }
 
+static void deferredDestroy_imageView(vk::ImageView id)
+{
+	RU.imageViewsToDestroy[RU.swapchain.imgInd].push_back(id);
+}
+
 void incRefCount(ImageViewId id)
 {
 	if (id == ImageViewId{})
@@ -359,7 +406,7 @@ void decRefCount(ImageViewId id)
 	auto& c = RU.imageViews_refCount[id.id];
 	c--;
 	if (c == 0) {
-		RU.imageViewsToDestroy[RU.swapchain.imgInd].push_back(RU.imageViews_vk[id.id]);
+		deferredDestroy_imageView(RU.imageViews_vk[id.id]);
 		releaseImageViewEntry(id.id);
 	}
 }
@@ -372,6 +419,68 @@ ImageViewRC makeImageView(const MakeImageView& info)
 	RU.imageViews_vk[e] = RU.device.createImageView(infoVk);
 	RU.imageViews_refCount[e] = 0;
 	return ImageViewRC{ ImageViewId{e} };
+}
+
+// --- FRAMEBUFFERS ---
+
+static void deferredDestroy_framebuffer(VkFramebuffer id)
+{
+	RU.framebuffersToDestroy[RU.swapchain.imgInd].push_back(id);
+}
+
+#if 0
+FramebufferId makeFramebuffer(const MakeFramebuffer& info)
+{
+	std::array<vk::ImageView, 2> attachments;
+	u32 numAttachments = 0;
+	u32 w = 0, h = 0;
+	tg::ImageInfo colorImageInfo;
+	tg::ImageInfo depthImageInfo;
+	if (info.colorBuffer.id.isValid()) {
+		colorImageInfo = info.colorBuffer.id.getImage().id.getInfo();
+		w = colorImageInfo.w;
+		h = colorImageInfo.h;
+	}
+	if (info.depthBuffer.id.isValid()) {
+		depthImageInfo = info.depthBuffer.id.getImage().id.getInfo();
+		w = depthImageInfo.w;
+		h = depthImageInfo.h;
+	}
+	const VkFramebuffer fb = RU.device.createFramebuffer({
+		.renderPass = RU.renderPass,
+		.attachments = {attachments.data(), numAttachments},
+		.width = w, .height = h
+	});
+}
+#endif
+
+// ---
+
+static u32 discretizeAnisotropicFiltering(float a)
+{
+	a -= 1.f;
+	a *= k_anisotropicFractionResolution;
+	a += 0.5f;
+	int x = a;
+	x = glm::clamp(x, 0, int(k_anisotropicFilteringNumDiscreteValues));
+	return x;
+}
+
+VkSampler getNearestSampler()
+{
+	VkSampler& sampler = RU.defaultSamplers.nearest;
+	if(sampler == VK_NULL_HANDLE)
+		sampler = RU.device.createSampler(vk::Filter::nearest, vk::Filter::nearest, vk::SamplerMipmapMode::nearest, vk::SamplerAddressMode::clampToEdge);
+	return sampler;
+}
+
+VkSampler getAnisotropicFilteringSampler(float maxAniso)
+{
+	const u32 e = discretizeAnisotropicFiltering(maxAniso);
+	VkSampler& sampler = RU.defaultSamplers.mipmap_anisotropic[e];
+	if(sampler == VK_NULL_HANDLE)
+		sampler = RU.device.createSampler(vk::Filter::linear, vk::Filter::linear, vk::SamplerMipmapMode::linear, vk::SamplerAddressMode::clampToEdge, maxAniso);
+	return sampler;
 }
 
 // --- GEOMETRY ---
@@ -401,6 +510,11 @@ static void releaseGeomEntry(u32 e)
 	// TODO: do some safety check in debug mode for detecting double-free
 }
 
+static void deferredDestroy_buffer(vk::Buffer id)
+{
+	RU.buffersToDestroy[RU.swapchain.imgInd].push_back(id);
+}
+
 const GeomInfo& GeomId::getInfo()const
 {
 	return RU.geoms_info[id];
@@ -423,23 +537,35 @@ void decRefCount(GeomId id)
 	auto& c = RU.geoms_refCount[id.id];
 	c--;
 	if (c == 0) {
-		RU.buffersToDestroy[RU.swapchain.imgInd].push_back(RU.geoms_buffer[id.id]);
+		deferredDestroy_buffer(RU.geoms_buffer[id.id]);
 		releaseGeomEntry(id.id);
 	}
 }
 
-GeomRC registerGeom(const GeomInfo& info, vk::Buffer buffer)
+GeomRC geom_create()
 {
-	const u32 id = acquireGeomEntry();
-	RU.geoms_info[id] = info;
-	RU.geoms_buffer[id] = buffer;
-	RU.geoms_refCount[id] = 0;
-	return GeomRC(GeomId{ id });
+	const u32 e = acquireGeomEntry();
+	RU.geoms_info[e] = GeomInfo{};
+	RU.geoms_buffer[e] = vk::Buffer{};
+	RU.geoms_refCount[e] = 0;
+	return GeomRC(GeomId{ e });
 }
 
-GeomRC createGeom(const CreateGeomInfo& info)
+void geom_resetFromBuffer(const GeomRC& h, const GeomInfo& info, vk::Buffer buffer)
 {
-	GeomInfo geomInfo = { .attribOffset_positions = 0 };
+	const u32 e = h.id.id;
+	if (RU.geoms_buffer[e].id) {
+		RU.device.destroyBuffer(RU.geoms_buffer[e]);
+	}
+
+	RU.geoms_info[e] = info;
+	RU.geoms_buffer[e] = buffer;
+	RU.geoms_refCount[e] = 0;
+}
+
+void geom_resetFromInfo(const GeomRC& h, const CreateGeomInfo& info, AABB* aabb)
+{
+	GeomInfo geomInfo = {  };
 	assert(info.positions.size());
 	std::array<CSpan<u8>, 6> datas;
 	u32 numDatas = 0;
@@ -452,7 +578,7 @@ GeomRC createGeom(const CreateGeomInfo& info)
 			numDatas++;
 		}
 	};
-	
+
 	considerAttrib(geomInfo.attribOffset_positions, info.positions);
 	considerAttrib(geomInfo.attribOffset_normals, info.normals);
 	considerAttrib(geomInfo.attribOffset_tangents, info.tangents);
@@ -464,9 +590,117 @@ GeomRC createGeom(const CreateGeomInfo& info)
 
 	auto usage = vk::BufferUsage::indexBuffer | vk::BufferUsage::vertexBuffer | vk::BufferUsage::transferDst;
 	auto buffer = RU.device.createBuffer(usage, offset, vk::BufferHostAccess{});
-	stageData(buffer, { datas.data(), numDatas});
+	stageData(buffer, { datas.data(), numDatas });
 
-	return registerGeom(geomInfo, buffer);
+	geom_resetFromBuffer(h, geomInfo, buffer);
+
+	if (aabb) {
+		CSpan<glm::vec3> positions((const glm::vec3*)info.positions.data(), info.numVerts);
+		*aabb = tk::pointCloudToAABB(positions);
+	}
+}
+
+bool geom_resetFromFile(const GeomRC& h, CStr filePath, AABB* aabb)
+{
+	auto file = PHYSFS_openRead(filePath);
+	if (!file)
+		return false;
+	auto len = PHYSFS_fileLength(file);
+	std::vector<u8> data(len);
+	PHYSFS_readBytes(file, data.data(), len);
+	return geom_resetFromMemFile(h, data, aabb);
+}
+
+bool geom_resetFromMemFile(const GeomRC& h, CSpan<u8> mem, AABB* aabb)
+{
+	if (mem.size() < sizeof(GeomInfo))
+		return false;
+	const GeomInfo& info = *(const GeomInfo*)mem.data(); // only works for little-endian
+	const auto data = CSpan<u8>(mem).subspan(sizeof(GeomInfo));
+	auto attribSubspan = [&data](u32 offset, u32 size) -> CSpan<u8> {
+		if (offset == u32(-1))
+			return {};
+		return data.subspan(offset, size);
+	};
+	const CreateGeomInfo createInfo = {
+		.positions = attribSubspan(info.attribOffset_positions, info.numVerts * sizeof(glm::vec3)),
+		.normals = attribSubspan(info.attribOffset_normals, info.numVerts * sizeof(glm::vec3)),
+		.tangents = attribSubspan(info.attribOffset_tangents, info.numVerts * sizeof(glm::vec3)),
+		.texCoords = attribSubspan(info.attribOffset_texCoords, info.numVerts * sizeof(glm::vec2)),
+		.colors = attribSubspan(info.attribOffset_colors, info.numVerts * sizeof(glm::vec4)),
+		.indices = attribSubspan(info.indsOffset, info.numInds * sizeof(u32)),
+		.numVerts = info.numVerts,
+		.numInds = info.numInds,
+	};
+	geom_resetFromInfo(h, createInfo, aabb);
+	return true;
+}
+
+GeomRC geom_getOrLoadFromFile(CStr path, AABB* aabb)
+{
+	if (u32 e = RU.geoms_pathBag.getEntry(path); e != u32(-1)) {
+		return GeomRC(GeomId{ e });
+	}
+	GeomRC h = geom_create();
+	if (!geom_resetFromFile(h, path, aabb))
+		return GeomRC{};
+	return h;
+}
+
+size_t geom_serializeToMem(const CreateGeomInfo& geomInfo, std::span<u8> data)
+{
+	const CSpan<u8> attribsData[] = {
+		geomInfo.positions,
+		geomInfo.normals,
+		geomInfo.tangents,
+		geomInfo.texCoords,
+		geomInfo.colors,
+		geomInfo.indices,
+	};
+	constexpr size_t numAttribs = std::size(attribsData);
+	static_assert(numAttribs == size_t(AttribSemantic::COUNT) + 1);
+
+	size_t reqMemSpace = sizeof(GeomInfo);
+	for (CSpan<u8> attribData : attribsData) {
+		reqMemSpace += attribData.size();
+	}
+	if (reqMemSpace > data.size())
+		return reqMemSpace;
+
+	u32 offset = 0;
+	std::span<u32> offsets((u32*)data.data(), numAttribs);
+	for (size_t i = 0; i < numAttribs; i++) {
+		const auto& AD = attribsData[i];
+		if (AD.size()) {
+			memcpy(data.data() + sizeof(GeomInfo) + offset, AD.data(), AD.size());
+			offsets[i] = offset;
+			offset += AD.size();
+		}
+		else
+			offsets[i] = u32(-1);
+	}
+	u32& numVerts = *((u32*)data.data() + numAttribs);
+	numVerts = geomInfo.numVerts;
+	u32& numInds = *((u32*)data.data() + numAttribs + 1);
+	numInds = geomInfo.numInds;
+	return reqMemSpace;
+}
+
+bool geom_serializeToFile(const CreateGeomInfo& geomInfo, CStr dstPath)
+{
+	auto file = PHYSFS_openWrite(dstPath);
+	if (!file) {
+		printf("could not open file for writing (%s): %s\n", dstPath, PHYSFS_getLastError());
+		return false;
+	}
+	defer(PHYSFS_close(file));
+
+	const size_t memSize = geom_serializeToMem(geomInfo, {});
+	auto mem = std::make_unique_for_overwrite<u8[]>(memSize);
+	geom_serializeToMem(geomInfo, { mem.get(), memSize});
+
+	const size_t bytesWritten = PHYSFS_writeBytes(file, mem.get(), memSize);
+	return bytesWritten == memSize;
 }
 
 // --- MATERIAL ---
@@ -535,7 +769,7 @@ void PbrMaterialManager::init(u32 maxExpectedMaterials)
 			.descriptorCount = maxExpectedMaterials,
 		}
 	};
-	descPool = RU.device.createDescriptorPool(maxExpectedMaterials, descPoolSizes, {});
+	descPool = RU.device.createDescriptorPool(maxExpectedMaterials, descPoolSizes, {.allowFreeIndividualSets = true});
 }
 
 static u32 acquireMaterialEntry(PbrMaterialManager& mgr)
@@ -816,7 +1050,7 @@ PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialInfo& params)
 				.binding = numWrites,
 				.type = vk::DescriptorType::combinedImageSampler,
 				.imageInfo = {
-					.sampler = RU.defaultSampler,
+					.sampler = getAnisotropicFilteringSampler(params.anisotropicFiltering),
 					.imageView = RU.device.getVkHandle(img.id.getHandle()),
 					.imageLayout = vk::ImageLayout::shaderReadOnly,
 				}
@@ -1036,7 +1270,7 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 	RU.swapchainOptions = {};
 	vk::ASSERT_VKRES(vk::createSwapchainSyncHelper(RU.swapchain, RU.surface, RU.device, RU.swapchainOptions));
 
-	RU.renderPass = [&]() {
+	auto makeRenderPass = [&](vk::ImageLayout finalLayout) {
 		vk::FbAttachmentInfo attachments[] = {
 			{.format = RU.swapchain.format.format},
 			{.format = RU.depthStencilFormat}
@@ -1045,13 +1279,13 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 			{ // color
 				.loadOp = vk::Attachment_LoadOp::clear,
 				.expectedLayout = vk::ImageLayout::undefined,
-				.finalLayout = vk::ImageLayout::presentSrc,
+				.finalLayout = finalLayout,
 			},
 			{ // depth
 				.loadOp = vk::Attachment_LoadOp::clear,
-				.storeOp = vk::Attachment_StoreOp::dontCare,
+				.storeOp = vk::Attachment_StoreOp::dontCare, // we don't care about the contents of the depth buffer after the pass
 				.expectedLayout = vk::ImageLayout::undefined,
-				.finalLayout = vk::ImageLayout::depthStencilAttachment, // we don't care about the contents of the depth buffer after the pass
+				.finalLayout = vk::ImageLayout::depthStencilAttachment,
 			}
 		};
 		static_assert(std::size(attachments) == std::size(attachmentOps));
@@ -1062,7 +1296,10 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 			.colorAttachments = colorAttachments,
 			.depthStencilAttachment = 1,
 		});
-	}();
+	};
+
+	RU.renderPass = makeRenderPass(vk::ImageLayout::presentSrc);
+	RU.renderPassOffscreen = makeRenderPass(vk::ImageLayout::shaderReadOnly);
 
 	RU.shaderCompiler.init();
 
@@ -1084,15 +1321,16 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 		RU.globalDescSetLayout = RU.device.createDescriptorSetLayout(bindings);
 	}
 
-	RU.defaultSampler = RU.device.createSampler(vk::Filter::linear, vk::Filter::linear, vk::SamplerMipmapMode::linear, vk::SamplerAddressMode::clampToEdge);
+	RU.defaultSamplers.mipmap_anisotropic[0] = RU.device.createSampler(vk::Filter::linear, vk::Filter::linear, vk::SamplerMipmapMode::linear, vk::SamplerAddressMode::clampToEdge);
 
 	RU.imgui.enabled = params.enableImgui;
 	if (params.enableImgui) {
+		const u32 maxExpectedSamplers = 1024;
 		const VkDescriptorPoolSize sizes[] = { VkDescriptorPoolSize {
 			.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-			.descriptorCount = 1,
+			.descriptorCount = maxExpectedSamplers,
 		} };
-		RU.imgui.descPool = RU.device.createDescriptorPool(1, sizes, {});
+		RU.imgui.descPool = RU.device.createDescriptorPool(maxExpectedSamplers, sizes, {.allowFreeIndividualSets = true});
 
 		ImGui_ImplVulkan_InitInfo info = {
 			.Instance = RU.device.instance,
@@ -1194,9 +1432,123 @@ void destroyRenderWorld(RenderWorldId id)
 	RU.renderWorlds[id.id] = {};
 }
 
+// RENDER TARGET
+static void createRenderTarget_inPlace(RenderTargetId id, u32 w, u32 h)
+{
+	auto& rt = RU.renderTargets[id.id];
+
+	for (u32 i = 0; i < RU.swapchain.numImages; i++) {
+
+		rt.colorBuffer[i] = RU.device.createImage(vk::ImageInfo{
+			.size = {u16(w), u16(h)},
+			.usage = vk::ImageUsage::default_framebuffer(false, true),
+		});
+		rt.colorBufferView[i] = RU.device.createImageView({ .image = rt.colorBuffer[i] });
+
+		rt.depthBuffer[i] = RU.device.createImage(vk::ImageInfo{
+			.size = {u16(w), u16(h)},
+			.format = RU.depthStencilFormat,
+			.usage = vk::ImageUsage::default_framebuffer(false, true),
+		});
+		rt.depthBufferView[i] = RU.device.createImageView({ .image = rt.depthBuffer[i] });
+
+		std::array<vk::ImageView, 2> attachments = { rt.colorBufferView[i], rt.depthBufferView[i] };
+		rt.framebuffer[i] = RU.device.createFramebuffer(vk::FramebufferInfo{
+			.renderPass = RU.renderPassOffscreen,
+			.attachments = {attachments.data(), 2},
+			.width = w, .height = h,
+		});
+	}
+
+	rt.w = w;
+	rt.h = h;
+	rt.needRedraw = true;
+}
+
+static void destroyRenderTarget_inPlace(RenderTargetId id)
+{
+	assert(id.isValid());
+	auto& rt = RU.renderTargets[id.id];
+	for (u32 i = 0; i < RU.swapchain.numImages; i++) {
+		deferredDestroy_framebuffer(rt.framebuffer[i]);
+		deferredDestroy_imageView(rt.colorBufferView[i]);
+		deferredDestroy_image(rt.colorBuffer[i]);
+		deferredDestroy_imageView(rt.depthBufferView[i]);
+		deferredDestroy_image(rt.depthBuffer[i]);
+	}
+
+}
+
+RenderTargetId createRenderTarget(const RenderTargetParams& params)
+{
+	const u32 w = params.w;
+	const u32 h = params.h;
+
+	const u32 rtInd = RU.renderTargets.alloc();
+	const RenderTargetId id = { rtInd };
+	auto& rt = RU.renderTargets[id.id];
+	rt.autoRedraw = params.autoRedraw;
+
+	createRenderTarget_inPlace(id, w, h);
+	return { rtInd };
+}
+
+void destroyRenderTarget(RenderTargetId id)
+{
+	destroyRenderTarget_inPlace(id);
+	RU.renderTargets.free(id.id);
+}
+
+vk::Image RenderTargetId::getTextureImage()
+{
+	return getTextureImage(RU.swapchain.imgInd);
+}
+vk::Image RenderTargetId::getTextureImage(u32 scImgInd)
+{
+	return RU.renderTargets[id].colorBuffer[scImgInd];
+}
+vk::ImageView RenderTargetId::getTextureImageView()
+{
+	return getTextureImageView(RU.swapchain.imgInd);
+}
+vk::ImageView RenderTargetId::getTextureImageView(u32 scImgInd)
+{
+	return RU.renderTargets[id].colorBufferView[scImgInd];
+}
+VkImageView RenderTargetId::getTextureImageViewVk()
+{
+	return getTextureImageViewVk(RU.swapchain.imgInd);
+}
+VkImageView RenderTargetId::getTextureImageViewVk(u32 scImgInd)
+{
+	return RU.device.getVkHandle(getTextureImageView(scImgInd));
+}
+
+void RenderTargetId::requestRedraw()
+{
+	RU.renderTargets[id].needRedraw = true;
+}
+
+void RenderTargetId::resize(u32 w, u32 h)
+{
+	destroyRenderTarget_inPlace(*this);
+	createRenderTarget_inPlace(*this, w, h);
+}
+
+u32 getNumSwapchainImages()
+{
+	return RU.swapchain.numImages;
+}
+u32 getCurrentSwapchainImageInd()
+{
+	return RU.swapchain.imgInd;
+}
+
+
+// ---
+
 static u32 acquireObjectEntry(RenderWorld& RW)
 {
-
 	// there wasn't a free entry; need to create one
 	const u32 e = RW.objects_info.size();
 	RW.objects_entry_to_id.emplace_back();
@@ -1244,14 +1596,19 @@ void RenderWorldId::destroyObject(ObjectId oid)
 
 void RenderWorldId::debugGui()
 {
-	ImGui::Begin("RenderWorld");
+	if (!RU.imgui.enabled)
+		return;
+
+	char windowLabel[16];
+	snprintf(windowLabel, std::size(windowLabel), "RenderWorld(%d)", id);
+	ImGui::Begin(windowLabel);
 	auto& RW = RU.renderWorlds[id];
 	for (u32 entry = 0; entry < RW.objects_entry_to_id.size(); entry++) {
 		const u32 id = RW.objects_entry_to_id[entry];
 		if (!RW.objects_info[entry].mesh.id.isValid())
 			continue;
 		const auto& info = RW.objects_info[entry];
-		if (ImGui::TreeNode((void*) 0, "%d", id)) {
+		if (ImGui::TreeNode((void*)uintptr_t(id), "%d", id)) {
 			ImGui::Text("Mesh: %d", info.mesh.id);
 			ImGui::Text("Max Instances: %d", info.maxInstances);
 			ImGui::Text("Num Instances: %d", info.numInstances);
@@ -1352,8 +1709,9 @@ void RenderWorld::_defragmentObjects()
 }
 
 // *** DRAW ***
-static void draw_renderWorld(RenderWorldId renderWorldId, const RenderWorldViewport& rwViewport, u32 viewportInd)
+static void draw_renderWorld(const RenderWorldViewport& rwViewport, u32 renderTargetInd, u32 viewportInd)
 {
+	const RenderWorldId& renderWorldId = rwViewport.renderWorld;
 	auto& RW = RU.renderWorlds[renderWorldId.id];
 
 	// update global uniform buffer
@@ -1399,12 +1757,17 @@ static void draw_renderWorld(RenderWorldId renderWorldId, const RenderWorldViewp
 	const size_t instancingBufferRequiredSize = 3 * sizeof(glm::mat4) * size_t(totalInstances);
 	const size_t instancingBufferRequiredExtendedSize = 4 * sizeof(glm::mat4) * size_t(totalInstances); // 33% more that the minimum required size
 	// NOTE: notice we don't use a staging buffer here
-	// From what I've read, since we are going to use it only once, it should be akoy to use a host-visible buffer for instancing
-	auto& instancingBuffers = RW.instancingBuffers[RU.swapchain.imgInd];
-	assert(viewportInd <= instancingBuffers.size());
-	if (instancingBuffers.size() == viewportInd) {
+	// From what I've read, since we are going to use it only once, it should be okay to use a host-visible buffer for instancing
+	auto& instancingBuffers_scImg = RW.instancingBuffers[RU.swapchain.imgInd];
+	if (instancingBuffers_scImg.size() <= renderTargetInd) {
+		instancingBuffers_scImg.resize(renderTargetInd + 1);
+	}
+
+	auto& instancingBuffers = instancingBuffers_scImg[renderTargetInd];
+	if (instancingBuffers.size() <= viewportInd) {
+		instancingBuffers.resize(viewportInd + 1);
 		vk::Buffer b = RU.device.createBuffer(vk::BufferUsage::vertexBuffer, instancingBufferRequiredExtendedSize, { .sequentialWrite = true });
-		instancingBuffers.push_back(b);
+		instancingBuffers[viewportInd] = b;
 	}
 	else {
 		auto& instancingBuffer = instancingBuffers[viewportInd];
@@ -1468,7 +1831,7 @@ static void draw_renderWorld(RenderWorldId renderWorldId, const RenderWorldViewp
 	}
 }
 
-void draw(CSpan<RenderWorldViewport> viewports)
+void prepareDraw()
 {
 	if (RU.screenW != RU.oldScreenW || RU.screenH != RU.oldScreenH) {
 		// detect window resize -> recreate the swapchain
@@ -1485,16 +1848,26 @@ void draw(CSpan<RenderWorldViewport> viewports)
 	}
 
 	RU.swapchain.acquireNextImage(RU.device);
+}
+
+void draw(
+	CSpan<RenderWorldViewport> mainViewports,
+	CSpan<RenderTargetWorldViewports> renderTargetsViewports
+)
+{
+	RU.swapchain.waitCanStartFrame(RU.device);
 
 	const auto mainQueue = RU.device.queues[0][0];
-
-	RU.swapchain.waitCanStartFrame(RU.device);
 	const u32 scImgInd = RU.swapchain.imgInd;
 
 	// destroy resources that had been scheduled
 	for (auto& x : RU.buffersToDestroy[scImgInd])
 		RU.device.destroyBuffer(x);
 	RU.buffersToDestroy[scImgInd].resize(0);
+
+	for (auto& x : RU.framebuffersToDestroy[scImgInd])
+		RU.device.destroyFramebuffer(x);
+	RU.framebuffersToDestroy[scImgInd].resize(0);
 
 	for (auto& x : RU.imageViewsToDestroy[scImgInd])
 		RU.device.destroyImageView(x);
@@ -1678,7 +2051,43 @@ void draw(CSpan<RenderWorldViewport> viewports)
 
 	cmdBuffer_staging.end();
 	
-	// begin renderPass
+	// renderTargets
+	for (u32 rtI = 0; rtI < u32(renderTargetsViewports.size()); rtI++) {
+		auto& rtv = renderTargetsViewports[rtI];
+		auto& rt = RU.renderTargets[rtv.renderTarget.id];
+		if (!rt.autoRedraw && !rt.needRedraw)
+			continue;
+		
+		//const vk::Image attachments[] = { rt.colorBuffer[scImgInd], rt.depthBuffer[scImgInd] };
+		//cmdBuffer_draw.cmd_pipelineBarrier_imagesToColorAttachment(RU.device, attachments);
+
+		// renderTargets - begin renderPass
+		const glm::vec4& c = rtv.clearColor;
+		const VkClearValue clearValues[] = {
+			{.color = {.float32 = {c.r, c.g, c.b, c.a}}},
+			{.depthStencil = {.depth = 1.f, .stencil = 0}},
+		};
+		cmdBuffer_draw.cmd_beginRenderPass({
+			.renderPass = RU.renderPassOffscreen,
+			.framebuffer = rt.framebuffer[scImgInd],
+			.renderArea = {0, 0, rt.w, rt.h},
+			.clearValues = clearValues,
+		});
+
+		for (u32 viewportInd = 0; viewportInd < u32(rtv.viewports.size()); viewportInd++) {
+			const auto& viewport = rtv.viewports[viewportInd];
+			draw_renderWorld(viewport, rtv.renderTarget.id + 1, viewportInd);
+		}
+
+		// end render pass
+		cmdBuffer_draw.cmd_endRenderPass();
+
+		//cmdBuffer_draw.cmd_pipelineBarrier_images_colorAttachment_to_shaderRead(RU.device, { &rt.colorBuffer[scImgInd], 1 });
+
+		rt.needRedraw = false;
+	}
+
+	// main - begin renderPass
 	const VkClearValue clearValues[] = {
 		{.color = {.float32 = {0.1f, 0.1f, 0.1f, 0.f}}},
 		{.depthStencil = {.depth = 1.f, .stencil = 0}}
@@ -1691,29 +2100,29 @@ void draw(CSpan<RenderWorldViewport> viewports)
 	});
 	
 	// draw the viewports
-	for (u32 viewportI = 0; viewportI < u32(viewports.size()); viewportI++) {
-		const auto& viewport = viewports[viewportI];
+	for (u32 viewportI = 0; viewportI < u32(mainViewports.size()); viewportI++) {
+		const auto& viewport = mainViewports[viewportI];
 		const RenderWorldId renderWorldId = viewport.renderWorld;
 		RenderWorld& RW = RU.renderWorlds[renderWorldId.id];
-		draw_renderWorld(renderWorldId, viewport, viewportI);
+		draw_renderWorld(viewport, /*main*/ 0, viewportI);
 	}
-	
-	// end render pass
-	cmdBuffer_draw.cmd_endRenderPass();
 
 	// imgui
-	{
+	if(RU.imgui.enabled) {
 		ImGui::Render();
 		ImDrawData* drawData = ImGui::GetDrawData();
 		ImGui_ImplVulkan_RenderDrawData(drawData, cmdBuffer_draw.handle);
 	}
+	
+	// end render pass
+	cmdBuffer_draw.cmd_endRenderPass();
 
 	// submit everything
 	cmdBuffer_draw.end();
 	{
 		const std::tuple<VkSemaphore, vk::PipelineStages> waitSemaphores[] = {
 			{
-				RU.swapchain.semaphore_imageAvailable[RU.swapchain.frameInd],
+				RU.swapchain.semaphore_imageAvailable[RU.swapchain.imageAvailableSemaphoreInd],
 				vk::PipelineStages::colorAttachmentOutput
 			}
 		};
@@ -1753,6 +2162,8 @@ void draw(CSpan<RenderWorldViewport> viewports)
 
 void imgui_newFrame()
 {
+	if (!RU.imgui.enabled)
+		return;
 	// Start the Dear ImGui frame
 	ImGui_ImplVulkan_NewFrame();
 	ImGui_ImplGlfw_NewFrame();

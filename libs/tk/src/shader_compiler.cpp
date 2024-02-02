@@ -56,16 +56,17 @@ static shaderc_include_result* include_resolve_callback (
 		return nullptr;
 	
 	namespace fs = std::filesystem;
-	fs::path sourcePath(requesting_source);
-	sourcePath.remove_filename();
+	auto shaderCompiler = (ShaderCompiler*)user_data;
+
+	fs::path sourceDir(requesting_source);
+	sourceDir.remove_filename();
 	fs::path headerPath;
 	if (type == shaderc_include_type_relative)
-		headerPath = fs::absolute(sourcePath / requested_source);
+		headerPath = sourceDir / requested_source;
 	else {
-		headerPath = fs::absolute(requested_source);
+		headerPath =  fs::path(shaderCompiler->rootShadersPath) / requested_source;
 	}
 
-	auto shaderCompiler = (ShaderCompiler*)user_data;
 	auto it = shaderCompiler->getOrLoadGlsl(headerPath.string().c_str());
 	auto res = new shaderc_include_result;
 	if (it == shaderCompiler->glslSrcsCache.end()) {
@@ -123,10 +124,11 @@ CompileResult ShaderCompiler::glslToSpv(ZStrView filePath, CSpan<PreprocDefine> 
 ShaderCompiler::CacheMap::const_iterator ShaderCompiler::getOrLoadGlsl(ZStrView filePath)
 {
 	if (auto it = glslSrcsCache.find(filePath); it == glslSrcsCache.end()) {
-		std::string src = loadTextFile(filePath);
-		if (src.empty())
+		std::string src;
+		if (!loadTextFile(src, filePath))
 			return glslSrcsCache.end();
-		return glslSrcsCache.insert({ filePath, src }).first;
+		auto insertionResult = glslSrcsCache.insert({ filePath, src });
+		return insertionResult.first;
 	}
 	else {
 		return it;

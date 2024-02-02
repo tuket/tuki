@@ -462,6 +462,7 @@ struct BufferData {
 
 struct PhysicalDeviceInfo {
 	VkPhysicalDevice handle;
+	VkPhysicalDeviceFeatures features;
 	VkPhysicalDeviceProperties props;
 	VkPhysicalDeviceMemoryProperties memProps;
 	std::vector<VkQueueFamilyProperties> queueFamiliesProps;
@@ -557,6 +558,8 @@ struct CmdBuffer {
 
 	void cmd_pipelineBarrier_imagesToTransferDstLayout(Device& device, CSpan<Image> images);
 	void cmd_pipelineBarrier_imagesToShaderReadLayout(Device& device, CSpan<Image> images);
+	//void cmd_pipelineBarrier_images_colorAttachment_to_shaderRead(Device& device, CSpan<Image> images);
+	//void cmd_pipelineBarrier_imagesToColorAttachment(Device& device, CSpan<Image> images);
 	//void cmd_pipelineBarrier_imagesToDepthAttachmentLayout(Device& device, CSpan<Image> images);
 
 
@@ -1011,7 +1014,7 @@ struct Device
 	const ImageViewInfo& getInfo(ImageView view)const { assert(view.id); return imageViews.infos[view.id - 1]; }
 
 	VkSampler createSampler(const SamplerInfo& info);
-	VkSampler createSampler(Filter minFilter, Filter magFilter, SamplerMipmapMode mipmapMode, SamplerAddressMode addressMode);
+	VkSampler createSampler(Filter minFilter, Filter magFilter, SamplerMipmapMode mipmapMode, SamplerAddressMode addressMode, float maxAnisotropy = 1.f);
 	void destroySampler(VkSampler sampler);
 
 	VkCommandPool createCmdPool(u32 queueFamily, CmdPoolOptions options);
@@ -1090,11 +1093,11 @@ struct Swapchain {
 };
 
 struct SwapchainSyncHelper : Swapchain {
-	VkSemaphore semaphore_imageAvailable[MAX_IMAGES];
+	VkSemaphore semaphore_imageAvailable[MAX_IMAGES+1];
 	VkSemaphore semaphore_drawFinished[MAX_IMAGES];
 	VkFence fence_drawFinished[MAX_IMAGES];
 	u32 imgInd = 0; // the image index to draw to and later present
-	u32 frameInd = 0;
+	u32 imageAvailableSemaphoreInd = 0;
 	//VkCommandPool cmdPools[MAX_IMAGES];
 	//VkCommandBuffer cmdBuffers_draw[MAX_IMAGES];
 	//VkCommandBuffer cmdBuffers_transfer[MAX_IMAGES];
