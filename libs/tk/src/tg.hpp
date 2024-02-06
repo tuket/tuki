@@ -143,6 +143,34 @@ FramebufferId makeFramebuffer(const MakeFramebuffer& info);
 void destroyFramebuffer(FramebufferId id);
 */
 
+// DESCRIPTOR SETS
+struct DescPoolId : IdU32 {
+    auto operator<=>(const DescPoolId& o)const { return id <=> o.id; };
+    VkDescriptorPool getHandleVk()const;
+};
+struct PoolDescSetId : IdU32 {
+    auto operator<=>(const PoolDescSetId& o)const { return id <=> o.id; };
+};
+struct DescSetId {
+    DescPoolId descPool;
+    PoolDescSetId id;
+    auto operator<=>(const DescSetId& o)const { return std::tie(descPool, id) <=> std::tie(o.descPool, o.id); }
+    bool isValid()const { return id.isValid(); }
+};
+
+struct MakeDescPool {
+    u32 maxSets = 0;
+    struct MaxPerType {
+        u32 uniformBuffers = 0;
+        u32 combinedImageSamplers = 0;
+    } maxPerType;
+    vk::DescPoolOptions options;
+};
+DescPoolId makeDescPool(const MakeDescPool& info);
+
+void releaseDescSets(DescPoolId poolId, CSpan<VkDescriptorSet> descSets);
+inline void releaseDescSets(DescPoolId poolId, VkDescriptorSet descSet) { releaseDescSets(poolId, {&descSet, 1}); }
+
 // SAMPLERS
 VkSampler getNearestSampler();
 VkSampler getAnisotropicFilteringSampler(float maxAniso);
@@ -276,7 +304,7 @@ DERIVED_MATERIAL_RC(PbrMaterial);
 struct PbrMaterialManager {
     MaterialManagerId managerId;
     u32 maxExpectedMaterials = 0;
-    VkDescriptorPool descPool;
+    DescPoolId descPool;
     VkDescriptorSetLayout descSetLayouts[/*hasAlbedoTexture*/ 2][/*hasNormalTexture*/ 2][/*hasMetallicRoughnessTexture*/ 2] = {};
     VkPipelineLayout pipelineLayouts[/*hasAlbedoTexture*/ 2][/*hasNormalTexture*/ 2][/*hasMetallicRoughnessTexture*/ 2] = {};
     VkPipeline pipelines

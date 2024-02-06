@@ -745,6 +745,8 @@ int main(int argc, char** argv)
 		}
 	}
 
+	defer(FilePreviews::geomMaterialRC = tg::MaterialRC{});
+
 	glm::dvec2 prevMousePos;
 	glfwGetCursorPos(glfwWindow, &prevMousePos.x, &prevMousePos.y);
 

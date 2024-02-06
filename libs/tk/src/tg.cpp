@@ -41,6 +41,8 @@ static constexpr u32 k_anisotropicFractionResolution = 4;
 static constexpr u32 k_maxAnisotropicFiltering = 16; // https://vulkan.gpuinfo.org/displaydevicelimit.php?name=maxSamplerAnisotropy&platform=all
 static constexpr u32 k_anisotropicFilteringNumDiscreteValues = (k_maxAnisotropicFiltering - 1) * k_anisotropicFractionResolution + 1;
 
+struct DescPool_DescSet { DescPoolId descPool; VkDescriptorSet descSet; };
+
 struct RenderUniverse
 {
 	u32 queueFamily;
@@ -70,10 +72,23 @@ struct RenderUniverse
 	std::vector<StagingBuffer> bussyStagingBuffers[MAX_SWAPCHAIN_IMAGES]; // here we keep the staging buffers that are in use. After the staging process is finished, we move the stagingBuffer back to spareStagingBuffers
 
 	// resources to destroy
-	std::vector<vk::Buffer> buffersToDestroy[MAX_SWAPCHAIN_IMAGES];
-	std::vector<vk::Image> imagesToDestroy[MAX_SWAPCHAIN_IMAGES];
-	std::vector<vk::ImageView> imageViewsToDestroy[MAX_SWAPCHAIN_IMAGES];
-	std::vector<VkFramebuffer> framebuffersToDestroy[MAX_SWAPCHAIN_IMAGES];
+	struct ToDestroy {
+		// for each frame-in-flight we store the resources that need to be destroyed
+		// after a complete cycle,w e can be sure that the resources not in use anymore
+		std::vector<vk::Buffer> buffers[MAX_SWAPCHAIN_IMAGES];
+		std::vector<vk::Image> images[MAX_SWAPCHAIN_IMAGES];
+		std::vector<vk::ImageView> imageViews[MAX_SWAPCHAIN_IMAGES];
+		std::vector<VkFramebuffer> framebuffers[MAX_SWAPCHAIN_IMAGES];
+		std::vector<std::array<std::vector<VkDescriptorSet>, MAX_SWAPCHAIN_IMAGES>> descSets; // [descPool][scImgInd][descSet]
+
+		// here we temporarily queue the resources that need to be destroyed. Later we will transfer these resources to queues above
+		std::vector<vk::Buffer> buffersTmp;
+		std::vector<vk::Image> imagesTmp;
+		std::vector<vk::ImageView> imageViewsTmp;
+		std::vector<VkFramebuffer> framebuffersTmp;
+		std::vector<std::vector<VkDescriptorSet>> descSetsTmp; // [descPool][descSet]
+		bool pushToTmp = true;
+	} toDestroy;
 
 	// images
 	std::vector<vk::Image> images_vk;
@@ -89,6 +104,12 @@ struct RenderUniverse
 	std::vector<u32> imageViews_refCount;
 	std::vector<ImageRC> imageViews_image;
 	u32 imageViews_nextFreeEntry = u32(-1);
+
+	// descriptor sets
+	std::vector<VkDescriptorPool> descPools;
+	std::vector<std::vector<VkDescriptorSet>> descSets;
+	u32 descPools_nextFreeEntry = u32(-1);
+	std::vector<u32> descSets_nextFreeEntry;
 
 	// geoms
 	std::vector<GeomInfo> geoms_info;
@@ -249,9 +270,17 @@ static void releaseImageEntry(u32 e)
 	// TODO: do some safety check in debug mode for detecting double-free
 }
 
+static void deferredDestroy(auto& frames, auto& tmp, auto id)
+{
+	if (RU.toDestroy.pushToTmp)
+		tmp.push_back(id);
+	else
+		frames[RU.swapchain.imgInd].push_back(id);
+}
+
 static void deferredDestroy_image(vk::Image id)
 {
-	RU.imagesToDestroy[RU.swapchain.imgInd].push_back(id);
+	deferredDestroy(RU.toDestroy.images, RU.toDestroy.imagesTmp, id);
 }
 
 void incRefCount(ImageId id)
@@ -390,7 +419,7 @@ static void releaseImageViewEntry(u32 e)
 
 static void deferredDestroy_imageView(vk::ImageView id)
 {
-	RU.imageViewsToDestroy[RU.swapchain.imgInd].push_back(id);
+	deferredDestroy(RU.toDestroy.imageViews, RU.toDestroy.imageViewsTmp, id);
 }
 
 void incRefCount(ImageViewId id)
@@ -425,7 +454,7 @@ ImageViewRC makeImageView(const MakeImageView& info)
 
 static void deferredDestroy_framebuffer(VkFramebuffer id)
 {
-	RU.framebuffersToDestroy[RU.swapchain.imgInd].push_back(id);
+	deferredDestroy(RU.toDestroy.framebuffers, RU.toDestroy.framebuffersTmp, id);
 }
 
 #if 0
@@ -453,6 +482,63 @@ FramebufferId makeFramebuffer(const MakeFramebuffer& info)
 	});
 }
 #endif
+
+// --- DESCRIPTOR SETS ---
+template <typename FirstVector, typename... Vectors>
+u32 acquireReusableEntry(u32& nextFreeEntry, FirstVector& firstVector, Vectors&... vectors)
+{
+	if (nextFreeEntry != u32(-1)) {
+		// there was a free entry
+		const u32 e = nextFreeEntry;
+		nextFreeEntry = *(u32*)&firstVector[e];
+		return e;
+	}
+
+	const u32 e = firstVector.size();
+	firstVector.emplace_back();
+	(vectors.emplace_back(), ...);
+	return e;
+}
+
+template <typename FirstVector, typename... Vectors>
+void releaseReusableEntry(u32& nextFreeEntry, FirstVector& firstVector, u32 entryToRelase)
+{
+	*(u32*)&firstVector[entryToRelase] = nextFreeEntry;
+	nextFreeEntry = entryToRelase;
+}
+
+static u32 acquireDescPoolEntry()
+{
+	return acquireReusableEntry(RU.descPools_nextFreeEntry, RU.descPools, RU.descSets, RU.toDestroy.descSets, RU.toDestroy.descSetsTmp);
+}
+static void releaseDescPoolEntry(u32 entryToRelease)
+{
+	releaseReusableEntry(RU.descPools_nextFreeEntry, RU.descPools, entryToRelease);
+}
+
+VkDescriptorPool DescPoolId::getHandleVk()const
+{
+	return RU.descPools[id];
+}
+
+DescPoolId makeDescPool(const MakeDescPool& info)
+{
+	const u32 e = acquireDescPoolEntry();
+	const VkDescriptorPoolSize sizesPerType[] = {
+		{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, info.maxPerType.uniformBuffers},
+		{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, info.maxPerType.combinedImageSamplers},
+	};
+	RU.descPools[e] = RU.device.createDescriptorPool(info.maxSets, sizesPerType, info.options);
+	return { e };
+}
+
+void releaseDescSets(DescPoolId descPool, CSpan<VkDescriptorSet> toRelease)
+{
+	auto& descSets = RU.toDestroy.descSets[descPool.id];
+	auto& descSetsTmp = RU.toDestroy.descSetsTmp[descPool.id];
+	for (auto descSet : toRelease)
+		deferredDestroy(descSets, descSetsTmp, descSet);
+}
 
 // ---
 
@@ -512,7 +598,7 @@ static void releaseGeomEntry(u32 e)
 
 static void deferredDestroy_buffer(vk::Buffer id)
 {
-	RU.buffersToDestroy[RU.swapchain.imgInd].push_back(id);
+	deferredDestroy(RU.toDestroy.buffers, RU.toDestroy.buffersTmp, id);
 }
 
 const GeomInfo& GeomId::getInfo()const
@@ -759,17 +845,14 @@ void PbrMaterialManager::init(u32 maxExpectedMaterials)
 	materials_descSet.reserve(maxExpectedMaterials);
 	uniformBuffer = RU.device.createBuffer(vk::BufferUsage::uniformBuffer | vk::BufferUsage::transferDst, maxExpectedMaterials * sizeof(PbrUniforms), {});
 
-	const VkDescriptorPoolSize descPoolSizes[] = {
-		{
-			.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-			.descriptorCount = 3 * maxExpectedMaterials
+	descPool = makeDescPool({
+		.maxSets = maxExpectedMaterials,
+		.maxPerType = {
+			.uniformBuffers = maxExpectedMaterials,
+			.combinedImageSamplers = 3 * maxExpectedMaterials,
 		},
-		{
-			.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-			.descriptorCount = maxExpectedMaterials,
-		}
-	};
-	descPool = RU.device.createDescriptorPool(maxExpectedMaterials, descPoolSizes, {.allowFreeIndividualSets = true});
+		.options = {.allowFreeIndividualSets = true}
+	});
 }
 
 static u32 acquireMaterialEntry(PbrMaterialManager& mgr)
@@ -1018,7 +1101,7 @@ PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialInfo& params)
 	const bool hasMetallicRoughnessTexture = params.metallicRoughnessImageView.id.isValid();
 	const auto descSetLayout = getCreateDescriptorSetLayout(hasAlbedoTexture, hasNormalTexture, hasMetallicRoughnessTexture);
 	VkDescriptorSet descSet;
-	vk::ASSERT_VKRES(RU.device.allocDescriptorSets(descPool, descSetLayout, { &descSet, 1 }));
+	vk::ASSERT_VKRES(RU.device.allocDescriptorSets(descPool.getHandleVk(), descSetLayout, {&descSet, 1}));
 	const u32 entry = acquireMaterialEntry(*this);
 	materials_info[entry] = params;
 	materials_descSet[entry] = descSet;
@@ -1069,7 +1152,7 @@ PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialInfo& params)
 void PbrMaterialManager::destroyMaterial(MaterialId id)
 {
 	materials_info[id.id] = {};
-	RU.device.freeDescriptorSets(descPool, { &materials_descSet[id.id], 1});
+	releaseDescSets(descPool, materials_descSet[id.id]);
 	releaseMaterialEntry(*this, id.id);
 }
 
@@ -1861,21 +1944,25 @@ void draw(
 	const u32 scImgInd = RU.swapchain.imgInd;
 
 	// destroy resources that had been scheduled
-	for (auto& x : RU.buffersToDestroy[scImgInd])
-		RU.device.destroyBuffer(x);
-	RU.buffersToDestroy[scImgInd].resize(0);
-
-	for (auto& x : RU.framebuffersToDestroy[scImgInd])
-		RU.device.destroyFramebuffer(x);
-	RU.framebuffersToDestroy[scImgInd].resize(0);
-
-	for (auto& x : RU.imageViewsToDestroy[scImgInd])
-		RU.device.destroyImageView(x);
-	RU.imageViewsToDestroy[scImgInd].resize(0);
-
-	for (auto& x : RU.imagesToDestroy[scImgInd])
-		RU.device.destroyImage(x);
-	RU.imagesToDestroy[scImgInd].resize(0);
+	auto handleDeferredDestroys = [scImgInd](auto& frames, auto& tmp, auto destroyFn) {
+		for (auto& x : frames[scImgInd])
+			destroyFn(x);
+		frames[scImgInd].clear();
+		std::swap(frames[scImgInd], tmp);
+	};
+	handleDeferredDestroys(RU.toDestroy.buffers, RU.toDestroy.buffersTmp, [](auto x) { RU.device.destroyBuffer(x); });
+	handleDeferredDestroys(RU.toDestroy.framebuffers, RU.toDestroy.framebuffersTmp, [](auto x) { RU.device.destroyFramebuffer(x); });
+	handleDeferredDestroys(RU.toDestroy.imageViews, RU.toDestroy.imageViewsTmp, [](auto x) { RU.device.destroyImageView(x); });
+	handleDeferredDestroys(RU.toDestroy.images, RU.toDestroy.imagesTmp, [](auto x) { RU.device.destroyImage(x); });
+	for (size_t poolI = 0; poolI < RU.toDestroy.descSets.size(); poolI++) {
+		const auto& pool = RU.descPools[poolI];
+		auto& descSets = RU.toDestroy.descSets[poolI][scImgInd];
+		auto& descSetsTmp = RU.toDestroy.descSetsTmp[poolI];
+		RU.device.freeDescriptorSets(pool, descSets);
+		descSets.clear();
+		std::swap(descSets, descSetsTmp);
+	}
+	RU.toDestroy.pushToTmp = false;
 
 	auto& framebuffer = RU.framebuffers[scImgInd];
 	if (!framebuffer) {
@@ -2135,6 +2222,7 @@ void draw(
 			},
 		}, RU.swapchain.fence_drawFinished[scImgInd]);
 	}
+	RU.toDestroy.pushToTmp = true;
 
 	// move staging buffers around: spareStagingBuffers <--> bussyStagingBuffers
 	{

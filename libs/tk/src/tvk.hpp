@@ -1029,6 +1029,7 @@ struct Device
 	VkResult allocDescriptorSets(VkDescriptorPool pool, CSpan<VkDescriptorSetLayout> layouts, std::span<VkDescriptorSet> descSets);
 	VkResult allocDescriptorSets(VkDescriptorPool pool, VkDescriptorSetLayout layout, std::span<VkDescriptorSet> descSets);
 	void freeDescriptorSets(VkDescriptorPool pool, CSpan<VkDescriptorSet> descSets);
+	void freeDescriptorSet(VkDescriptorPool pool, VkDescriptorSet descSet) { freeDescriptorSets(pool, { &descSet, 1 }); }
 
 	void updateDescriptorSets(CSpan<DescriptorSetArrayWrite> writes, CSpan<DescriptorSetArrayCopy> copies);
 	void writeDescriptorSetArrays(CSpan<DescriptorSetArrayWrite> writes) { updateDescriptorSets(writes, {}); }
