@@ -240,6 +240,30 @@ static void stageDataToImage(vk::Image img, CSpan<u8> data)
 	cmdBuffer.cmd_copy(RU.device.getVkHandle(srcBuffer), RU.device.getVkHandle(img), { &copy, 1 });
 }
 
+template <typename FirstVector, typename... Vectors>
+u32 acquireReusableEntry(u32& nextFreeEntry, FirstVector& firstVector, Vectors&... vectors)
+{
+	if (nextFreeEntry != u32(-1)) {
+		// there was a free entry
+		const u32 e = nextFreeEntry;
+		nextFreeEntry = *(u32*)&firstVector[e];
+		return e;
+	}
+
+	const u32 e = firstVector.size();
+	firstVector.emplace_back();
+	(vectors.emplace_back(), ...);
+	return e;
+}
+
+template <typename FirstVector, typename... Vectors>
+void releaseReusableEntry(u32& nextFreeEntry, FirstVector& firstVector, u32 entryToRelase)
+{
+	*(u32*)&firstVector[entryToRelase] = nextFreeEntry;
+	nextFreeEntry = entryToRelase;
+	// // TODO: do some safety check in debug mode for detecting double-free
+}
+
 // --- IMAGES ---
 ImageInfo ImageId::getInfo()const { return RU.images_info[id]; }
 vk::Image ImageId::getHandle()const { return RU.images_vk[id]; }
@@ -247,27 +271,14 @@ void* ImageId::getInternalHandle()const { return RU.device.getVkHandle(getHandle
 
 static u32 acquireImageEntry()
 {
-	if (RU.images_nextFreeEntry != u32(-1)) {
-		// the was a free entry
-		const u32 e = RU.images_nextFreeEntry;
-		RU.images_nextFreeEntry = RU.images_refCount[e];
-		return e;
-	}
-
-	// there wasn't a free entry; need to create one
-	const u32 e = RU.images_vk.size();
-	RU.images_vk.emplace_back();
-	RU.images_refCount.emplace_back();
-	RU.images_info.emplace_back();
+	const u32 e = acquireReusableEntry(RU.images_nextFreeEntry,
+		RU.images_refCount, RU.images_vk, RU.images_info);
 	return e;
 }
 
 static void releaseImageEntry(u32 e)
 {
-	const u32 e2 = RU.images_nextFreeEntry;
-	RU.images_refCount[e] = e2;
-	RU.images_nextFreeEntry = e;
-	// TODO: do some safety check in debug mode for detecting double-free
+	releaseReusableEntry(RU.images_nextFreeEntry, RU.images_refCount, e);
 }
 
 static void deferredDestroy(auto& frames, auto& tmp, auto id)
@@ -394,27 +405,14 @@ void* ImageViewId::getInternalHandle()const
 
 static u32 acquireImageViewEntry()
 {
-	if (RU.imageViews_nextFreeEntry != u32(-1)) {
-		// the was a free entry
-		const u32 e = RU.imageViews_nextFreeEntry;
-		RU.imageViews_nextFreeEntry = RU.imageViews_refCount[e];
-		return e;
-	}
-
-	// there wasn't a free entry; need to create one
-	const u32 e = RU.imageViews_vk.size();
-	RU.imageViews_vk.emplace_back();
-	RU.imageViews_refCount.emplace_back();
-	RU.imageViews_image.emplace_back();
+	const u32 e = acquireReusableEntry(RU.imageViews_nextFreeEntry,
+		RU.imageViews_refCount, RU.imageViews_vk, RU.imageViews_image);
 	return e;
 }
 
 static void releaseImageViewEntry(u32 e)
 {
-	const u32 e2 = RU.imageViews_nextFreeEntry;
-	RU.imageViews_refCount[e] = e2;
-	RU.imageViews_nextFreeEntry = e;
-	// TODO: do some safety check in debug mode for detecting double-free
+	releaseReusableEntry(RU.imageViews_nextFreeEntry, RU.imageViews_refCount, e);
 }
 
 static void deferredDestroy_imageView(vk::ImageView id)
@@ -484,29 +482,6 @@ FramebufferId makeFramebuffer(const MakeFramebuffer& info)
 #endif
 
 // --- DESCRIPTOR SETS ---
-template <typename FirstVector, typename... Vectors>
-u32 acquireReusableEntry(u32& nextFreeEntry, FirstVector& firstVector, Vectors&... vectors)
-{
-	if (nextFreeEntry != u32(-1)) {
-		// there was a free entry
-		const u32 e = nextFreeEntry;
-		nextFreeEntry = *(u32*)&firstVector[e];
-		return e;
-	}
-
-	const u32 e = firstVector.size();
-	firstVector.emplace_back();
-	(vectors.emplace_back(), ...);
-	return e;
-}
-
-template <typename FirstVector, typename... Vectors>
-void releaseReusableEntry(u32& nextFreeEntry, FirstVector& firstVector, u32 entryToRelase)
-{
-	*(u32*)&firstVector[entryToRelase] = nextFreeEntry;
-	nextFreeEntry = entryToRelase;
-}
-
 static u32 acquireDescPoolEntry()
 {
 	return acquireReusableEntry(RU.descPools_nextFreeEntry, RU.descPools, RU.descSets, RU.toDestroy.descSets, RU.toDestroy.descSetsTmp);
@@ -857,28 +832,15 @@ void PbrMaterialManager::init(u32 maxExpectedMaterials)
 
 static u32 acquireMaterialEntry(PbrMaterialManager& mgr)
 {
-	if (const u32 e = mgr.materials_nextFreeEntry;
-		e != u32(-1))
-	{
-		// the was a free entry
-		mgr.materials_nextFreeEntry = *(const u32*)(&mgr.materials_info[e]);
-		return e;
-	}
-
-	// there wasn't a free entry; need to create one
-	const u32 e = mgr.materials_info.size();
+	const u32 e = acquireReusableEntry(mgr.materials_nextFreeEntry,
+		mgr.materials_info, mgr.materials_descSet, RU.materials_refCount[mgr.managerId.id]);
 	assert(e < mgr.maxExpectedMaterials);
-	mgr.materials_info.emplace_back();
-	mgr.materials_descSet.emplace_back();
-	RU.materials_refCount[mgr.managerId.id].emplace_back();
 	return e;
 }
 
 void releaseMaterialEntry(PbrMaterialManager& mgr, u32 e)
 {
-	const u32 e2 = mgr.materials_nextFreeEntry;
-	*(u32*)(&mgr.materials_info[e]) = e2;
-	mgr.materials_nextFreeEntry = e;
+	releaseReusableEntry(mgr.materials_nextFreeEntry, mgr.materials_info, e);
 }
 
 VkDescriptorSetLayout PbrMaterialManager::getCreateDescriptorSetLayout(bool hasAlbedoTexture, bool hasNormalTexture, bool hasMetallicRoughnessTexture)
@@ -1187,25 +1149,13 @@ VkPipelineLayout PbrMaterialManager::getPipelineLayout(MaterialId materialId)
 
 static u32 acquireMeshEntry()
 {
-	if (RU.meshes_nextFreeEntry != u32(-1)) {
-		// there was a free entry
-		const u32 e = RU.images_nextFreeEntry;
-		RU.meshes_nextFreeEntry = RU.meshes_refCount[e];
-		return e;
-	}
-
-	// there wasn't a free entry; need to create one
-	const u32 e = RU.meshes_info.size();
-	RU.meshes_info.emplace_back();
-	RU.meshes_refCount.emplace_back();
+	const u32 e = acquireReusableEntry(RU.meshes_nextFreeEntry, RU.meshes_refCount, RU.meshes_info);
 	return e;
 }
 
 static void releaseMeshEntry(u32 e)
 {
-	const u32 e2 = RU.meshes_nextFreeEntry;
-	RU.meshes_refCount[e] = e2;
-	RU.meshes_nextFreeEntry = e;
+	releaseReusableEntry(RU.meshes_nextFreeEntry, RU.meshes_refCount, e);
 }
 
 const MeshInfo MeshId::getInfo()const
@@ -1452,16 +1402,7 @@ ShaderCompiler& getShaderCompiler()
 // *** RENDER WORLD ***
 static u32 acquireRenderWorldEntry()
 {
-	if (RU.renderWorlds_nextFreeEntry != u32(-1)) {
-		// there was a free entry
-		const u32 e = RU.renderWorlds_nextFreeEntry;
-		RU.renderWorlds_nextFreeEntry = *(const u32*)&RU.renderWorlds[e];
-		return e;
-	}
-
-	// there wasn't a free entry; need to create one
-	const u32 e = RU.renderWorlds.size();
-	RU.renderWorlds.emplace_back();
+	const u32 e = acquireReusableEntry(RU.renderWorlds_nextFreeEntry, RU.renderWorlds);
 	return e;
 }
 
