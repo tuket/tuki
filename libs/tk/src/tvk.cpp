@@ -209,15 +209,7 @@ u32 Device::getMemTypeInd(BufferUsage usage, BufferHostAccess hostAccess, size_t
 
 Buffer Device::createBuffer(BufferUsage usage, size_t size, BufferHostAccess hostAccess)
 {
-	u32 slot;
-	if (buffers_nextFreeSlot != u32(-1)) {
-		slot = buffers_nextFreeSlot;
-		buffers_nextFreeSlot = u32(u64(buffers[slot].handle) & 0xFFFFFFFF);
-	}
-	else {
-		slot = buffers.size();
-		buffers.emplace_back();
-	}
+	const u32 slot = tk::acquireReusableEntry(buffers_nextFreeSlot, buffers, 0);
 
 	const u32 memType = getMemTypeInd(usage, hostAccess, size);
 	VmaAllocationCreateFlags flags = toVma(hostAccess);
@@ -252,8 +244,7 @@ void Device::destroyBuffer(Buffer buffer)
 	const u32 slot = buffer.id - 1;
 	BufferData& bufferData = buffers[slot];
 	vmaDestroyBuffer(allocator, bufferData.handle, bufferData.alloc);
-	bufferData.handle = VkBuffer(uintptr_t(buffers_nextFreeSlot));
-	buffers_nextFreeSlot = slot;
+	tk::releaseReusableEntry(buffers_nextFreeSlot, buffers, 0, slot);
 }
 
 u8* Device::getBufferMemPtr(Buffer buffer)
@@ -290,22 +281,12 @@ void Device::flushBuffer(Buffer buffer)
 
 Image Device::registerImage(VkImage img, const ImageInfo& info, VmaAllocation alloc)
 {
-	u32 slot;
-	if (images.nextFreeSlot == u32(-1)) {
-		slot = images.handles.size();
-		images.handles.emplace_back();
-		images.infos.emplace_back();
-		images.allocs.emplace_back();
-	}
-	else {
-		slot = images.nextFreeSlot;
-		images.nextFreeSlot = u32(uintptr_t(images.handles[slot]) & 0xFFFF'FFFF);
-	}
-	images.handles[slot] = img;
-	images.infos[slot] = info;
-	images.allocs[slot] = alloc;
+	const u32 e = tk::acquireReusableEntry(images.nextFreeSlot, images.handles, 0, images.infos, images.allocs);
+	images.handles[e] = img;
+	images.infos[e] = info;
+	images.allocs[e] = alloc;
 
-	return { slot + 1 };
+	return { e + 1 };
 }
 
 void Device::deregisterImage(Image img)
@@ -316,10 +297,9 @@ void Device::deregisterImage(Image img)
 	}
 
 	const u32 slot = img.id - 1;
-	images.handles[slot] = VkImage(uintptr_t(images.nextFreeSlot));
 	assert(images.infos[slot].dimensions != 0 && "double free?");
 	images.infos[slot].dimensions = 0;
-	images.nextFreeSlot = slot;
+	tk::releaseReusableEntry(images.nextFreeSlot, images.handles, 0, slot);
 }
 
 Image Device::createImage(const ImageInfo& info)
@@ -447,16 +427,7 @@ ImageView Device::createImageView(ImageViewInfo& info)
 	VkImageView view;
 	ASSERT_VKRES(vkCreateImageView(device, &infoVk, nullptr, &view));
 	
-	u32 slot;
-	if (imageViews.nextFreeSlot == u32(-1)) {
-		slot = imageViews.handles.size();
-		imageViews.handles.emplace_back();
-		imageViews.infos.emplace_back();
-	}
-	else {
-		slot = imageViews.nextFreeSlot;
-		imageViews.nextFreeSlot = u32(uintptr_t(imageViews.handles[slot]) & 0xFFFF'FFFF);
-	}
+	const u32 slot = tk::acquireReusableEntry(imageViews.nextFreeSlot, imageViews.handles, 0, imageViews.infos);
 	imageViews.handles[slot] = view;
 	imageViews.infos[slot] = info;
 	return { slot + 1 };
@@ -471,10 +442,9 @@ void Device::destroyImageView(ImageView imgView)
 	const u32 slot = imgView.id - 1;
 	vkDestroyImageView(device, imageViews.handles[slot], nullptr);
 
-	imageViews.handles[slot] = VkImageView(uintptr_t(imageViews.nextFreeSlot));
 	assert(imageViews.infos[slot].image.id != 0 && "double free?");
 	imageViews.infos[slot].image = { 0 };
-	imageViews.nextFreeSlot = slot;
+	tk::releaseReusableEntry(imageViews.nextFreeSlot, imageViews.handles, 0, slot);
 }
 
 VkSampler Device::createSampler(const SamplerInfo& info)
@@ -1453,24 +1423,24 @@ void CmdBuffer::cmd_endRenderPass()
 void CmdBuffer::cmd_pipelineBarrier(const PipelineBarrier& barrier)
 {
 	CMD_BUFFER_ASSERT_RECORDING;
-	std::vector<VkMemoryBarrier> memoryBarriers(barrier.memoryBarriers.size());
-	for (size_t i = 0; i < memoryBarriers.size(); i++)
-		memoryBarriers[i] = toVk(barrier.memoryBarriers[i]);
+	tmp_memoryBarriers.resize(barrier.memoryBarriers.size());
+	for (size_t i = 0; i < tmp_memoryBarriers.size(); i++)
+		tmp_memoryBarriers[i] = toVk(barrier.memoryBarriers[i]);
 
-	std::vector<VkBufferMemoryBarrier> bufferBarriers(barrier.bufferBarriers.size());
-	for (size_t i = 0; i < bufferBarriers.size(); i++)
-		bufferBarriers[i] = toVk(barrier.bufferBarriers[i]);
+	tmp_bufferBarriers.resize(barrier.bufferBarriers.size());
+	for (size_t i = 0; i < tmp_bufferBarriers.size(); i++)
+		tmp_bufferBarriers[i] = toVk(barrier.bufferBarriers[i]);
 
-	std::vector<VkImageMemoryBarrier> imageBarriers(barrier.imageBarriers.size());
-	for (size_t i = 0; i < imageBarriers.size(); i++)
-		imageBarriers[i] = toVk(barrier.imageBarriers[i]);
+	tmp_imageBarriers.resize(barrier.imageBarriers.size());
+	for (size_t i = 0; i < tmp_imageBarriers.size(); i++)
+		tmp_imageBarriers[i] = toVk(barrier.imageBarriers[i]);
 
 	vkCmdPipelineBarrier(handle,
 		toVk(barrier.srcStages), toVk(barrier.dstStages),
 		VkDependencyFlags(barrier.dependencyFlags),
-		memoryBarriers.size(), memoryBarriers.data(),
-		bufferBarriers.size(), bufferBarriers.data(),
-		imageBarriers.size(), imageBarriers.data()
+		tmp_memoryBarriers.size(), tmp_memoryBarriers.data(),
+		tmp_bufferBarriers.size(), tmp_bufferBarriers.data(),
+		tmp_imageBarriers.size(), tmp_imageBarriers.data()
 	);
 }
 

@@ -149,7 +149,37 @@ struct PathBag
     void deleteEntry(u32 entry);
 };
 
-template <typename T>
+template <typename Int, typename FirstVector, typename... Vectors>
+Int acquireReusableEntry(Int& nextFreeEntry, FirstVector& firstVector, size_t firstVectorOffset, Vectors&... vectors)
+{
+    assert(firstVectorOffset + sizeof(Int) <= sizeof(FirstVector::value_type));
+    if (nextFreeEntry != Int(-1)) {
+        // there was a free entry
+        const Int e = nextFreeEntry;
+        u8* ptr = (u8*)&firstVector[e];
+        ptr += firstVectorOffset;
+        nextFreeEntry = *(Int*)ptr;
+        return e;
+    }
+
+    const Int e = firstVector.size();
+    firstVector.emplace_back();
+    (vectors.emplace_back(), ...);
+    return e;
+}
+
+template <typename Int, typename FirstVector, typename... Vectors>
+void releaseReusableEntry(Int& nextFreeEntry, FirstVector& firstVector, size_t firstVectorOffset, u32 entryToRelase)
+{
+    assert(firstVectorOffset + sizeof(Int) <= sizeof(FirstVector::value_type));
+    u8* ptr = (u8*)&firstVector[entryToRelase];
+    ptr += firstVectorOffset;
+    *(Int*)ptr = nextFreeEntry;
+    nextFreeEntry = entryToRelase;
+    // TODO: do some safety check in debug mode for detecting double-free
+}
+
+template <typename T, size_t offset = 0>
 struct EntriesArray
 {
     std::vector<T> entries;
@@ -158,20 +188,14 @@ struct EntriesArray
 
     u32 alloc()
     {
-        if (nextFreeEntry != u32(-1))
-            return nextFreeEntry;
-
-        const u32 id = entries.size();
-        entries.emplace_back();
-        return id;
+        const u32 e = acquireReusableEntry(nextFreeEntry, entries, offset);
+        return e;
     }
 
     void free(u32 id)
     {
         assert(id < entries.size());
-
-        *(u32*)(&entries[id]) = nextFreeEntry;
-        nextFreeEntry = id;
+        releaseReusableEntry(nextFreeEntry, entries, offset, id);
     }
 
     T& operator[](u32 id)

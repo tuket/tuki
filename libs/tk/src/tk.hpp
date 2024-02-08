@@ -235,7 +235,7 @@ struct System_Render
     WorldId worldId;
     gfx::RenderWorldId RW;
     EntityFactory_Renderable3d* factory_renderable3d;
-    gfx::PbrMaterialManager pbrMaterialManager;
+    gfx::PbrMaterialManager* pbrMaterialManager = nullptr;
 
     System_Render(WorldId worldId);
     ~System_Render();
@@ -260,7 +260,7 @@ struct DefaultBasicWorldSystems
 // -- WORLD --
 struct World
 {
-    std::vector<EntityFactory*> entityFactories; // [entityType]
+    std::vector<std::unique_ptr<EntityFactory>> entityFactories; // [entityType]
     std::vector<std::string> componentNames; // (I belive the cstr pointer should keep valid if the vector resizes)
 
     std::vector<EntityTypeU16> entities_type; // [entity.ind]
@@ -318,11 +318,11 @@ struct World
     void addEntitiesToDelete(CSpan<u32> entities);
 
     template <typename EF>
-    EntityTypeU16 registerEntityFactory(EF* ef) {
+    EntityTypeU16 registerEntityFactory(std::unique_ptr<EF>&& ef) {
         const auto et = EF::s_type();
         if (et >= entityFactories.size())
-            entityFactories.resize(et + 1, nullptr);
-        entityFactories[et] = ef;
+            entityFactories.resize(et + 1);
+        entityFactories[et] = std::move(ef);
         return et;
     }
 
@@ -331,12 +331,12 @@ struct World
         auto typeInd = EF::s_type();
         if (typeInd < entityFactories.size() && entityFactories[typeInd] != nullptr)
             return typeInd; // already registered
-        return registerEntityFactory<EF>( new EF(id(), std::forward<Args>(args)...));
+        return registerEntityFactory<EF>(std::make_unique<EF>(id(), std::forward<Args>(args)...));
     }
 
     template <typename EF>
     EF& getEntityFactory() {
-        return *(EF*)entityFactories[EF::s_type()];
+        return *(EF*)entityFactories[EF::s_type()].get();
     }
 
     [[nodiscard]]
@@ -347,6 +347,7 @@ WorldId createWorld();
 void destroyWorld(WorldId worldId);
 
 // --- PROJECT ---
+#if 0
 struct Project
 {
     enum class FileType {
@@ -397,5 +398,6 @@ struct Project
     File _allocFileH();
     void _releaseFileH(File file);
 };
+#endif
 
 }

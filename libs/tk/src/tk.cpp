@@ -3,6 +3,7 @@
 #include <glm/gtx/quaternion.hpp>
 #include <imgui.h>
 #include <physfs.h>
+#include <Tracy.hpp>
 
 namespace tk {
 
@@ -196,13 +197,11 @@ void* EntityFactory_Renderable3d::s_accessComponentByIndFn(EntityFactory* self, 
 // -- SYSTEMS --
 System_Render::System_Render(WorldId worldId)
     : worldId(worldId)
-    , pbrMaterialManager()
 {
-    pbrMaterialManager.init();
-    tg::registerMaterialManager(pbrMaterialManager.getRegisterCallbacks());
+    pbrMaterialManager = gfx::PbrMaterialManager::s_getOrCreate();
     RW = gfx::createRenderWorld();
     auto et = worldId->createAndRegisterEntityFactory<EntityFactory_Renderable3d>(*this);
-    factory_renderable3d = (EntityFactory_Renderable3d*)worldId->entityFactories[et];
+    factory_renderable3d = (EntityFactory_Renderable3d*)worldId->entityFactories[et].get();
 }
 
 System_Render::~System_Render()
@@ -212,6 +211,7 @@ System_Render::~System_Render()
 
 void System_Render::update(float dt)
 {
+    ZoneScoped;
     for (size_t i = 0; i < factory_renderable3d->components_position3d.size(); i++) {
         const glm::vec3& position = factory_renderable3d->components_position3d[i];
         const glm::quat& rotation = factory_renderable3d->components_rotation3d[i];
@@ -237,7 +237,7 @@ void DefaultBasicWorldSystems::update(float dt)
 
 void DefaultBasicWorldSystems::destroy()
 {
-    delete &system_render;
+    delete system_render;
 }
 
 // -- WORLD --
@@ -256,9 +256,7 @@ World::World()
 
 World::~World()
 {
-    for (auto* factory : entityFactories) {
-        delete factory;
-    }
+    printf("~World\n");
 }
 
 WorldId World::id()const
@@ -268,6 +266,7 @@ WorldId World::id()const
 
 void World::update(float dt)
 {
+    ZoneScoped;
     if (entitiesToDelete.size()) {
         // 1) delete the entities in the factories
         auto sortedByType = entitiesToDelete;
@@ -303,7 +302,7 @@ const glm::mat4& World::getMatrix(u32 entityInd)
         return cachedEntityMatrices[entityInd];
     
     const u16 entityType = entities_type[entityInd];
-    auto* EF = entityFactories[entityType];
+    auto* EF = entityFactories[entityType].get();
     glm::vec3 pos = { 0, 0, 0 };
     glm::quat rot = {};
     glm::vec3 scale = {};
@@ -327,7 +326,7 @@ const glm::mat4& World::getMatrix(u32 entityInd)
     cachedEntityMatrices_isValid[entityInd] = true;
     cachedEntityMatrices[entityInd] = m;
     
-    return m;
+    return cachedEntityMatrices[entityInd];
 }
 
 static void assertEntityIsValidInWorld(EntityId e, const World& W)
@@ -339,30 +338,17 @@ static void assertEntityIsValidInWorld(EntityId e, const World& W)
 
 EntityId World::_createEntity(EntityTypeU16 entityType, u32 indInFactory, u32 parent)
 {
-    u32 e = entities_nextFreeEntry;
-    if (e == u32(-1)) {
-        entities_type.push_back(entityType);
-        entities_indInFactory.push_back(indInFactory);
+    const u32 e = acquireReusableEntry(entities_nextFreeEntry,
+        entities_indInFactory, 0,
+        entities_type,
+        entities_parent, entities_firstChild, entities_lastChild, entities_nextSibling, entities_prevSibling
 #ifndef NDEBUG
-        entities_counter.push_back(0);
+        , entities_counter
 #endif
-        entities_parent.push_back(0);
-        entities_firstChild.push_back(0);
-        entities_lastChild.push_back(0);
-        entities_nextSibling.push_back(0);
-        entities_prevSibling.push_back(0);
-        e = u32(entities_type.size() - 1);
-    }
-    else {
-        entities_nextFreeEntry = entities_indInFactory[e];
-        entities_type[e] = entityType;
-        entities_indInFactory[e] = indInFactory;
-        entities_parent[e] = 0;
-        entities_firstChild[e] = 0;
-        entities_lastChild[e] = 0;
-        entities_nextSibling[e] = 0;
-        entities_prevSibling[e] = 0;
-    }
+    );
+    entities_type[e] = entityType;
+    entities_indInFactory[e] = indInFactory;
+
     const EntityId eid = { id(), entityType, e,
 #ifndef NDEBUG
         entities_counter[e]
@@ -422,12 +408,10 @@ EntityId World::nextSibling(EntityId e)const
 
 void World::_destroyIsolatedEntity(u32 indInWorld)
 {
-    const u32 prevFree = entities_nextFreeEntry;
-    entities_nextFreeEntry = indInWorld;
 #ifndef NDEBUG
     entities_counter[indInWorld]++;
 #endif
-    entities_indInFactory[indInWorld] = prevFree;
+    releaseReusableEntry(entities_nextFreeEntry, entities_indInFactory, 0, indInWorld);
 }
 
 void World::_breakEntityLinks(u32 ei)
@@ -512,21 +496,15 @@ DefaultBasicWorldSystems World::createDefaultBasicSystems()
 
 WorldId createWorld()
 {
-    if (g_worlds_nextFreeEntry != u16(-1)) {
-        g_worlds[g_worlds_nextFreeEntry].entities_nextFreeEntry = u32(-1);
-        return WorldId{ g_worlds_nextFreeEntry };
-    }
-
-    g_worlds.emplace_back();
-    return WorldId{ u16(g_worlds.size() - 1) };
+    const u16 slot = tk::acquireReusableEntry(g_worlds_nextFreeEntry, g_worlds, offsetof(World, entities_nextFreeEntry));
+    return WorldId{ slot };
 }
 
 void destroyWorld(WorldId worldId)
 {
     auto& W = g_worlds[worldId.ind];
     W = {};
-    W.entities_nextFreeEntry = g_worlds_nextFreeEntry;
-    g_worlds_nextFreeEntry = worldId.ind;
+    tk::releaseReusableEntry(g_worlds_nextFreeEntry, g_worlds, offsetof(World, entities_nextFreeEntry), worldId.ind);
 }
 
 World* WorldId::operator->()
@@ -562,6 +540,7 @@ void EntityId::destroy()
 }
 
 // --- PROJECT ---
+#if 0
 Project::Project()
 {
     // root folder
@@ -727,5 +706,6 @@ void Project::_releaseFileH(File file)
     files_nextSibling[file.id] = files_nextFreeEntry;
     files_nextFreeEntry = file.id;
 }
+#endif
 
 }

@@ -169,7 +169,8 @@ struct MakeDescPool {
 DescPoolId makeDescPool(const MakeDescPool& info);
 
 void releaseDescSets(DescPoolId poolId, CSpan<VkDescriptorSet> descSets);
-inline void releaseDescSets(DescPoolId poolId, VkDescriptorSet descSet) { releaseDescSets(poolId, {&descSet, 1}); }
+inline void releaseDescSet(DescPoolId poolId, VkDescriptorSet descSet) { releaseDescSets(poolId, {&descSet, 1}); }
+void releaseImguiDescSet(VkDescriptorSet descSet);
 
 // SAMPLERS
 VkSampler getNearestSampler();
@@ -271,7 +272,7 @@ struct MaterialManager {
     VkDescriptorSet(*getDescriptorSet)(void*, MaterialId);
     //AttribLocations(*getAttibLocations)(void*, MaterialId);
 };
-void registerMaterialManager(const MaterialManager& backbacks);
+u32 registerMaterialManager(const MaterialManager& backbacks);
 
 // PBR MATERIAL
 struct Texture {
@@ -316,12 +317,6 @@ struct PbrMaterialManager {
     //std::vector<u32> materials_customSamplers; // shall be not null when we are not using a sampler from "defaultSamplers". When using custom samplers, we would need to delete the sampler when the material is destroyed
     vk::Buffer uniformBuffer; // a large uniform buffer contaning the data for all materials
     u32 materials_nextFreeEntry = -1;
-
-    void init(u32 maxExpectedMaterials = 4 << 10);
-
-    MaterialManager getRegisterCallbacks()const {
-        return { (void*)this, s_setManagerId, s_destroyMaterial, s_getPipeline, s_getPipelineLayout, s_getDescriptorSet };
-    }
     
     VkDescriptorSetLayout getCreateDescriptorSetLayout(bool hasAlbedoTexture, bool hasNormalTexture, bool hasMetallicRoughnessTexture);
     VkPipelineLayout getCreatePipelineLayout(bool hasAlbedoTexture, bool hasNormalTexture, bool hasMetallicRoughnessTexture);
@@ -333,13 +328,8 @@ struct PbrMaterialManager {
     VkPipeline getPipeline(MaterialId materialId, GeomId geomId);
     VkPipelineLayout getPipelineLayout(MaterialId materialId);
     VkDescriptorSet getDescriptorSet(MaterialId materialId) { return materials_descSet[materialId.id]; }
-    //AttribLocations getAttribLocations(MaterialId materialId)const { return { 0, 4, 8, 12, 13, 14, 15, 16, }; }
-    static void s_setManagerId(void* self, u32 id) { ((PbrMaterialManager*)self)->managerId = { id }; }
-    static void s_destroyMaterial(void* self, MaterialId id) { ((PbrMaterialManager*)self)->destroyMaterial(id); }
-    static VkPipeline s_getPipeline(void* self, MaterialId materialId, GeomId geomId) { return ((PbrMaterialManager*)self)->getPipeline(materialId, geomId); }
-    static VkPipelineLayout s_getPipelineLayout(void* self, MaterialId materialId) { return ((PbrMaterialManager*)self)->getPipelineLayout(materialId); }
-    static VkDescriptorSet s_getDescriptorSet(void* self, MaterialId materialId) { return ((PbrMaterialManager*)self)->getDescriptorSet(materialId); }
-    //static AttribLocations s_getAttribLocations(void* self, MaterialId materialId) { return ((PbrMaterialManager*)self)->getAttribLocations(materialId); }
+
+    static PbrMaterialManager* s_getOrCreate(u32 maxExpectedMaterials = 4 << 10);
 
     ~PbrMaterialManager() {
         printf("~PbrMaterialManager()\n");

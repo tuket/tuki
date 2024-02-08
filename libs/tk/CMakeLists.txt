@@ -4,6 +4,7 @@ set (CMAKE_CXX_STANDARD 20)
 
 find_package(Vulkan REQUIRED COMPONENTS shaderc_combined)
 
+add_subdirectory(libs/tracy)
 add_subdirectory(libs/glfw)
 add_subdirectory(libs/glm)
 add_subdirectory(libs/stb)
@@ -29,4 +30,4 @@ add_library(tk ${SRCS_TOP} ${SRCS})
 source_group("" FILES ${SRCS_TOP})
 source_group("tk" FILES ${SRCS})
 target_include_directories(tk PUBLIC ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(tk PUBLIC Vulkan::Vulkan Vulkan::shaderc_combined glfw glm stb cgltf wyhash imgui physfs-static)
+target_link_libraries(tk PUBLIC tracy Vulkan::Vulkan Vulkan::shaderc_combined glfw glm stb cgltf wyhash imgui physfs-static)

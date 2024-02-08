@@ -538,6 +538,9 @@ struct CmdBuffer {
 	enum class State { initial, recording, recording_oneTimeSubmit, executable, executable_oneTimeSubmit, executableOrPending, pendingOrInvalid };
 	State state = State::initial;
 #endif
+	std::vector<VkMemoryBarrier> tmp_memoryBarriers;
+	std::vector<VkBufferMemoryBarrier> tmp_bufferBarriers;
+	std::vector<VkImageMemoryBarrier> tmp_imageBarriers;
 
 	void begin(CmdBufferUsageFlags usageFlags, const VkCommandBufferInheritanceInfo* inheritanceInfo = nullptr);
 	void end();

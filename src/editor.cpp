@@ -11,6 +11,7 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
 #include <physfs.h>
+#include <Tracy.hpp>
 
 namespace tvk = tk::vk;
 using tk::CSpan;
@@ -139,6 +140,29 @@ static void completeCubeInds()
 	}
 }
 
+#define COLLECT_ALLOC_CALL_STACKS 32
+
+void* operator new(size_t size)
+{
+	void* p = malloc(size);
+#if COLLECT_ALLOC_CALL_STACKS
+	TracyAllocS(p, size, COLLECT_ALLOC_CALL_STACKS);
+#else
+	TracyAlloc(p, size);
+#endif
+	return p;
+}
+
+void operator delete(void* p)
+{
+	free(p);
+#if COLLECT_ALLOC_CALL_STACKS
+	TracyFreeS(p, COLLECT_ALLOC_CALL_STACKS);
+#else
+	TracyFree(p);
+#endif
+}
+
 tk::DefaultBasicWorldSystems systems;
 
 struct Camera {
@@ -229,6 +253,7 @@ static void deleteSelectedEntities(tk::WorldId mainWorld)
 
 static void imgui_hierarchy(tk::WorldId mainWorld)
 {
+	ZoneScoped;
 	ImGui::Begin("scene");
 	tk::EntityId e = mainWorld->getRootEntity().firstChild();
 	int i = 0;
@@ -336,10 +361,10 @@ struct FilePreviews {
 		tg::MeshRC mesh;
 		tk::EntityId entity;
 		tk::OrbitCamera orbitCamera;
+		tk::PerspectiveCamera perspectiveCamera;
 		tk::AABB aabb;
 		glm::uvec2 windowSize = { 0, 0 };
 		glm::vec2 prevMousePos = {0,0};
-		std::vector<VkDescriptorSet> toDelete_descSets[tvk::Swapchain::MAX_IMAGES];
 
 		//std::vector<glm::vec3> verts_positions;
 		//std::vector<glm::vec2> 
@@ -356,8 +381,11 @@ struct FilePreviews {
 			entity = factory.create({ .mesh = mesh });
 
 			orbitCamera.pivot = aabb.center();
-			orbitCamera.heading = orbitCamera.pitch = 0;//glm::quarter_pi<float>();
-			orbitCamera.distance = 5;
+			orbitCamera.heading = 0.75f * glm::quarter_pi<float>();
+			orbitCamera.pitch = -0.75f * glm::quarter_pi<float>();
+
+			const float L = 1.1f * glm::compMax(aabb.max - aabb.min);
+			orbitCamera.distance = L / tanf(perspectiveCamera.hFovY);
 		}
 
 		auto getRenderWorld() { return systems.system_render->RW; };
@@ -366,6 +394,7 @@ struct FilePreviews {
 		{
 			tg::destroyRenderTarget(renderTarget);
 			tk::destroyWorld(world);
+			systems.destroy();
 		}
 
 		void update(float dt)
@@ -383,7 +412,7 @@ struct FilePreviews {
 			for (u32 scImgInd = 0; scImgInd < numImages; scImgInd++)
 			{
 				if (descSets[scImgInd])
-					toDelete_descSets[scImgInd].push_back(descSets[scImgInd]);
+					tg::releaseImguiDescSet(descSets[scImgInd]);
 				
 				const VkSampler sampler = tg::getNearestSampler();
 				const VkImageView imgView = renderTarget.getTextureImageViewVk(scImgInd);
@@ -392,19 +421,8 @@ struct FilePreviews {
 			}
 		}
 
-		void processDeferredDeletes()
-		{
-			const u32 scImgInd = tg::getCurrentSwapchainImageInd();
-			for (auto& ds : toDelete_descSets[scImgInd]) {
-				ImGui_ImplVulkan_RemoveTexture(ds);
-				ds = VK_NULL_HANDLE;
-			}
-			toDelete_descSets[scImgInd].clear();
-		}
-
 		bool draw()
 		{
-			processDeferredDeletes();
 			const glm::vec2 mousePos = ImGui::GetMousePos();
 
 			bool open = true;
@@ -455,7 +473,7 @@ struct FilePreviews {
 	static tg::MaterialRC& geomMaterial()
 	{
 		if (!geomMaterialRC.id.isValid()) {
-			geomMaterialRC = systems.system_render->pbrMaterialManager.createMaterial({
+			geomMaterialRC = systems.system_render->pbrMaterialManager->createMaterial({
 				.albedo = {243.f / 255.f, 237.f / 255.f, 120.f / 255.f, 1.f}
 			});
 		}
@@ -481,6 +499,7 @@ struct FilePreviews {
 
 	void update(float dt)
 	{
+		ZoneScoped;
 		auto updatePreviews = [dt](auto& previews) {
 			for (auto& p : previews)
 				p.update(dt);
@@ -491,6 +510,7 @@ struct FilePreviews {
 
 	void draw()
 	{
+		ZoneScoped;
 		auto drawPreviews = [](auto& previews) {
 			for (size_t i = 0; i < previews.size(); ) {
 				const bool toClose = previews[i].draw();
@@ -520,13 +540,14 @@ struct FilePreviews {
 			const tg::RenderWorldViewport viewport = {
 				.renderWorld = gp.getRenderWorld(),
 				.viewMtx = gp.orbitCamera.viewMtx(),
-				.projMtx = tk::PerspectiveCamera{}.projMtx_vk(aspectRatio),
-				.viewport = {0, 0, fW, fW},
+				.projMtx = gp.perspectiveCamera.projMtx_vk(aspectRatio),
+				.viewport = {0, 0, fW, fH},
 				.scissor = {0, 0, w, h},
 			};
 			rtViewports.push_back(tg::RenderTargetWorldViewports{
 				.renderTarget = gp.renderTarget,
-				.viewports = {viewport}
+				//.clearColor = {1, 1, 1, 1},
+				.viewports = {viewport},
 			});
 		}
 	}
@@ -651,6 +672,7 @@ struct ProjectExplorer
 
 	void draw()
 	{
+		ZoneScoped;
 		ImGui::Begin("project");
 
 		tmpPath[0] = '\0';
@@ -693,7 +715,7 @@ int main(int argc, char** argv)
 	//defer(tk::destroyWorld());
 
 	systems = mainWorld->createDefaultBasicSystems();
-	auto& pbrMgr = systems.system_render->pbrMaterialManager;
+	auto& pbrMgr = *tg::PbrMaterialManager::s_getOrCreate();
 	auto& RW = systems.system_render->RW;
 	auto& factory_renderable3d = systems.system_render->factory_renderable3d;
 
@@ -780,6 +802,8 @@ int main(int argc, char** argv)
 		glfwSetWindowTitle(glfwWindow, windowTitle);
 
 		glfwGetFramebufferSize(glfwWindow, &screenW, &screenH);
+		if (screenW == 0 || screenH == 0)
+			continue;
 		const float aspectRatio = float(screenW) / float(screenH);
 
 		tg::prepareDraw();
@@ -842,6 +866,7 @@ int main(int argc, char** argv)
 		filePreviews.getRenderTargetsViewports(renderTargetsViewports);
 
 		tg::draw(mainViewports, renderTargetsViewports);
+		FrameMark;
 	}
 
 	return 0;

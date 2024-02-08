@@ -8,6 +8,7 @@
 
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
+#include <Tracy.hpp>
 
 namespace tk {
 namespace gfx {
@@ -148,7 +149,7 @@ struct RenderUniverse
 	// imgui
 	struct ImGui {
 		bool enabled = false;
-		VkDescriptorPool descPool = VK_NULL_HANDLE;
+		DescPoolId descPool = {};
 	} imgui;
 
 	~RenderUniverse() {
@@ -240,30 +241,6 @@ static void stageDataToImage(vk::Image img, CSpan<u8> data)
 	cmdBuffer.cmd_copy(RU.device.getVkHandle(srcBuffer), RU.device.getVkHandle(img), { &copy, 1 });
 }
 
-template <typename FirstVector, typename... Vectors>
-u32 acquireReusableEntry(u32& nextFreeEntry, FirstVector& firstVector, Vectors&... vectors)
-{
-	if (nextFreeEntry != u32(-1)) {
-		// there was a free entry
-		const u32 e = nextFreeEntry;
-		nextFreeEntry = *(u32*)&firstVector[e];
-		return e;
-	}
-
-	const u32 e = firstVector.size();
-	firstVector.emplace_back();
-	(vectors.emplace_back(), ...);
-	return e;
-}
-
-template <typename FirstVector, typename... Vectors>
-void releaseReusableEntry(u32& nextFreeEntry, FirstVector& firstVector, u32 entryToRelase)
-{
-	*(u32*)&firstVector[entryToRelase] = nextFreeEntry;
-	nextFreeEntry = entryToRelase;
-	// // TODO: do some safety check in debug mode for detecting double-free
-}
-
 // --- IMAGES ---
 ImageInfo ImageId::getInfo()const { return RU.images_info[id]; }
 vk::Image ImageId::getHandle()const { return RU.images_vk[id]; }
@@ -272,13 +249,13 @@ void* ImageId::getInternalHandle()const { return RU.device.getVkHandle(getHandle
 static u32 acquireImageEntry()
 {
 	const u32 e = acquireReusableEntry(RU.images_nextFreeEntry,
-		RU.images_refCount, RU.images_vk, RU.images_info);
+		RU.images_refCount, 0, RU.images_vk, RU.images_info);
 	return e;
 }
 
 static void releaseImageEntry(u32 e)
 {
-	releaseReusableEntry(RU.images_nextFreeEntry, RU.images_refCount, e);
+	releaseReusableEntry(RU.images_nextFreeEntry, RU.images_refCount, 0, e);
 }
 
 static void deferredDestroy(auto& frames, auto& tmp, auto id)
@@ -406,13 +383,13 @@ void* ImageViewId::getInternalHandle()const
 static u32 acquireImageViewEntry()
 {
 	const u32 e = acquireReusableEntry(RU.imageViews_nextFreeEntry,
-		RU.imageViews_refCount, RU.imageViews_vk, RU.imageViews_image);
+		RU.imageViews_refCount, 0, RU.imageViews_vk, RU.imageViews_image);
 	return e;
 }
 
 static void releaseImageViewEntry(u32 e)
 {
-	releaseReusableEntry(RU.imageViews_nextFreeEntry, RU.imageViews_refCount, e);
+	releaseReusableEntry(RU.imageViews_nextFreeEntry, RU.imageViews_refCount, 0, e);
 }
 
 static void deferredDestroy_imageView(vk::ImageView id)
@@ -484,11 +461,11 @@ FramebufferId makeFramebuffer(const MakeFramebuffer& info)
 // --- DESCRIPTOR SETS ---
 static u32 acquireDescPoolEntry()
 {
-	return acquireReusableEntry(RU.descPools_nextFreeEntry, RU.descPools, RU.descSets, RU.toDestroy.descSets, RU.toDestroy.descSetsTmp);
+	return acquireReusableEntry(RU.descPools_nextFreeEntry, RU.descPools, 0, RU.descSets, RU.toDestroy.descSets, RU.toDestroy.descSetsTmp);
 }
 static void releaseDescPoolEntry(u32 entryToRelease)
 {
-	releaseReusableEntry(RU.descPools_nextFreeEntry, RU.descPools, entryToRelease);
+	releaseReusableEntry(RU.descPools_nextFreeEntry, RU.descPools, 0, entryToRelease);
 }
 
 VkDescriptorPool DescPoolId::getHandleVk()const
@@ -513,6 +490,11 @@ void releaseDescSets(DescPoolId descPool, CSpan<VkDescriptorSet> toRelease)
 	auto& descSetsTmp = RU.toDestroy.descSetsTmp[descPool.id];
 	for (auto descSet : toRelease)
 		deferredDestroy(descSets, descSetsTmp, descSet);
+}
+
+void releaseImguiDescSet(VkDescriptorSet descSet)
+{
+	releaseDescSet(RU.imgui.descPool, descSet);
 }
 
 // ---
@@ -802,45 +784,28 @@ void decRefCount(MaterialId id)
 	}
 }
 
-void registerMaterialManager(const MaterialManager& mgr)
+u32 registerMaterialManager(const MaterialManager& mgr)
 {
 	const u32 mgrId = RU.materialManagers.size();
 	RU.materialManagers.push_back(mgr);
 	RU.materials_refCount.emplace_back();
 	mgr.setManagerId(mgr.managerPtr, mgrId);
+	return mgrId;
 }
 
 // --- PBR MATERIAL ---
 
-void PbrMaterialManager::init(u32 maxExpectedMaterials)
-{
-	assert(maxExpectedMaterials > 0);
-	this->maxExpectedMaterials = maxExpectedMaterials;
-	materials_info.reserve(maxExpectedMaterials);
-	materials_descSet.reserve(maxExpectedMaterials);
-	uniformBuffer = RU.device.createBuffer(vk::BufferUsage::uniformBuffer | vk::BufferUsage::transferDst, maxExpectedMaterials * sizeof(PbrUniforms), {});
-
-	descPool = makeDescPool({
-		.maxSets = maxExpectedMaterials,
-		.maxPerType = {
-			.uniformBuffers = maxExpectedMaterials,
-			.combinedImageSamplers = 3 * maxExpectedMaterials,
-		},
-		.options = {.allowFreeIndividualSets = true}
-	});
-}
-
 static u32 acquireMaterialEntry(PbrMaterialManager& mgr)
 {
 	const u32 e = acquireReusableEntry(mgr.materials_nextFreeEntry,
-		mgr.materials_info, mgr.materials_descSet, RU.materials_refCount[mgr.managerId.id]);
+		mgr.materials_info, 0, mgr.materials_descSet, RU.materials_refCount[mgr.managerId.id]);
 	assert(e < mgr.maxExpectedMaterials);
 	return e;
 }
 
 void releaseMaterialEntry(PbrMaterialManager& mgr, u32 e)
 {
-	releaseReusableEntry(mgr.materials_nextFreeEntry, mgr.materials_info, e);
+	releaseReusableEntry(mgr.materials_nextFreeEntry, mgr.materials_info, 0, e);
 }
 
 VkDescriptorSetLayout PbrMaterialManager::getCreateDescriptorSetLayout(bool hasAlbedoTexture, bool hasNormalTexture, bool hasMetallicRoughnessTexture)
@@ -1114,7 +1079,7 @@ PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialInfo& params)
 void PbrMaterialManager::destroyMaterial(MaterialId id)
 {
 	materials_info[id.id] = {};
-	releaseDescSets(descPool, materials_descSet[id.id]);
+	releaseDescSet(descPool, materials_descSet[id.id]);
 	releaseMaterialEntry(*this, id.id);
 }
 
@@ -1145,17 +1110,61 @@ VkPipelineLayout PbrMaterialManager::getPipelineLayout(MaterialId materialId)
 	return pipelineLayouts[hasAlbedoTexture][hasNormalTexture][hasMetallicRoughnessTexture];
 }
 
+PbrMaterialManager* PbrMaterialManager::s_getOrCreate(u32 maxExpectedMaterials)
+{
+	static PbrMaterialManager* mgr = nullptr;
+	if (mgr)
+		return mgr;
+
+	assert(maxExpectedMaterials > 0);
+	mgr = new PbrMaterialManager;
+	mgr->maxExpectedMaterials = maxExpectedMaterials;
+	mgr->materials_info.reserve(maxExpectedMaterials);
+	mgr->materials_descSet.reserve(maxExpectedMaterials);
+	mgr->uniformBuffer = RU.device.createBuffer(vk::BufferUsage::uniformBuffer | vk::BufferUsage::transferDst, maxExpectedMaterials * sizeof(PbrUniforms), {});
+
+	mgr->descPool = makeDescPool({
+		.maxSets = maxExpectedMaterials,
+		.maxPerType = {
+			.uniformBuffers = maxExpectedMaterials,
+			.combinedImageSamplers = 3 * maxExpectedMaterials,
+		},
+		.options = {.allowFreeIndividualSets = true}
+	});
+
+	registerMaterialManager({
+		.managerPtr = mgr,
+		.setManagerId = [](void* self, u32 id) {
+			((PbrMaterialManager*)self)->managerId = { id };
+		},
+		.destroyMaterial = [](void* self, MaterialId id) {
+			((PbrMaterialManager*)self)->destroyMaterial(id);
+		},
+		.getPipeline = [](void* self, MaterialId materialId, GeomId geomId) {
+			return ((PbrMaterialManager*)self)->getPipeline(materialId, geomId);
+		},
+		.getPipelineLayout = [](void* self, MaterialId materialId) {
+			return ((PbrMaterialManager*)self)->getPipelineLayout(materialId);
+		},
+		.getDescriptorSet = [](void* self, MaterialId materialId) {
+			return ((PbrMaterialManager*)self)->getDescriptorSet(materialId);
+		},
+	});
+
+	return mgr;
+}
+
 // --- MESHES ---
 
 static u32 acquireMeshEntry()
 {
-	const u32 e = acquireReusableEntry(RU.meshes_nextFreeEntry, RU.meshes_refCount, RU.meshes_info);
+	const u32 e = acquireReusableEntry(RU.meshes_nextFreeEntry, RU.meshes_refCount, 0, RU.meshes_info);
 	return e;
 }
 
 static void releaseMeshEntry(u32 e)
 {
-	releaseReusableEntry(RU.meshes_nextFreeEntry, RU.meshes_refCount, e);
+	releaseReusableEntry(RU.meshes_nextFreeEntry, RU.meshes_refCount, 0, e);
 }
 
 const MeshInfo MeshId::getInfo()const
@@ -1359,11 +1368,11 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 	RU.imgui.enabled = params.enableImgui;
 	if (params.enableImgui) {
 		const u32 maxExpectedSamplers = 1024;
-		const VkDescriptorPoolSize sizes[] = { VkDescriptorPoolSize {
-			.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-			.descriptorCount = maxExpectedSamplers,
-		} };
-		RU.imgui.descPool = RU.device.createDescriptorPool(maxExpectedSamplers, sizes, {.allowFreeIndividualSets = true});
+		RU.imgui.descPool = makeDescPool({
+			.maxSets = maxExpectedSamplers,
+			.maxPerType = {.combinedImageSamplers = maxExpectedSamplers},
+			.options = {.allowFreeIndividualSets = true}
+		});
 
 		ImGui_ImplVulkan_InitInfo info = {
 			.Instance = RU.device.instance,
@@ -1372,7 +1381,7 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 			.QueueFamily = RU.queueFamily,
 			.Queue = RU.device.queues[RU.queueFamily][0],
 			.PipelineCache = VK_NULL_HANDLE,
-			.DescriptorPool = RU.imgui.descPool,
+			.DescriptorPool = RU.imgui.descPool.getHandleVk(),
 			.Subpass = 0,
 			.MinImageCount = RU.swapchainOptions.minImages,
 			.ImageCount = RU.swapchain.numImages,
@@ -1402,7 +1411,7 @@ ShaderCompiler& getShaderCompiler()
 // *** RENDER WORLD ***
 static u32 acquireRenderWorldEntry()
 {
-	const u32 e = acquireReusableEntry(RU.renderWorlds_nextFreeEntry, RU.renderWorlds);
+	const u32 e = acquireReusableEntry(RU.renderWorlds_nextFreeEntry, RU.renderWorlds, 0);
 	return e;
 }
 
@@ -1879,6 +1888,7 @@ void draw(
 	CSpan<RenderTargetWorldViewports> renderTargetsViewports
 )
 {
+	ZoneScoped;
 	RU.swapchain.waitCanStartFrame(RU.device);
 
 	const auto mainQueue = RU.device.queues[0][0];
