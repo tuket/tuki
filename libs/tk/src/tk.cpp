@@ -79,7 +79,7 @@ EntityId EntityFactory_Renderable3d::create(const Create& info)
         const u64 geomAndMaterial = (u64(info.geom.id.id) << u64(32)) | u64(info.material.id.id);
         if (auto it = geomAndMaterial_to_gfxObjectInd.find(geomAndMaterial); it == geomAndMaterial_to_gfxObjectInd.end()) {
             auto mesh = gfx::makeMesh({ .geom = info.geom, .material = info.material });
-            gfxObjects.emplace_back(system_render.RW.createObject(mesh));
+            gfxObjects.emplace_back(system_render.RW.createObject(mesh, glm::mat4(1), info.expectedMaxInstances));
             gfxObjectInd = u32(gfxObjects.size() - 1);
             geomAndMaterial_to_gfxObjectInd[geomAndMaterial] = gfxObjectInd;
         }
@@ -487,7 +487,6 @@ void World::setEntityNextSiblingAfter(EntityId e, EntityId s)
 DefaultBasicWorldSystems World::createDefaultBasicSystems()
 {
     auto system_render = new System_Render(id());
-    EntityTypeU16 entityType_renderable3d = createAndRegisterEntityFactory<EntityFactory_Renderable3d>(*system_render);
 
     return DefaultBasicWorldSystems {
         system_render

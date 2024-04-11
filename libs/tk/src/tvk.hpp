@@ -984,6 +984,7 @@ struct Device
 		std::vector<ImageViewInfo> infos;
 		u32 nextFreeSlot = u32(-1);
 	} imageViews;
+	std::vector<VkCommandBuffer> tmp_cmdBuffers; // just to avoid memory allocations... Maybe we should use a scratch buffer for this kind of thing, or use a stack allocator of some kind
 
 	void waitIdle();
 

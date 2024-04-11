@@ -215,19 +215,33 @@ struct IconCodes {
 };
 static constexpr IconCodes iconCodes{};
 
+static void initImguiFonts(GLFWwindow* window, bool firstTime)
+{
+	// TODO: better handling of DPI awareness (e.g moving window from one monitor to another)
+	// https://github.com/ocornut/imgui/blob/master/docs/FAQ.md#q-how-should-i-handle-dpi-in-my-application
+	auto& io = ImGui::GetIO();
+	if (!firstTime) {
+		io.Fonts->ClearFonts();
+	}
+	float scaleX, scaleY;
+	glfwGetWindowContentScale(window, &scaleX, &scaleY);
+	ImFontConfig fontConfig = {};
+	fontConfig.SizePixels = ceilf(13.f * scaleX);
+	ImFont* font = io.Fonts->AddFontDefault(&fontConfig);
+	static const ImWchar icons_ranges[] = { 0xe8000, 0xf3ff, 0 };
+	ImFontConfig config;
+	config.MergeMode = true;
+	const float iconsFontSize = ceilf(18.f * scaleX);
+	io.Fonts->AddFontFromFileTTF("assets/fontello/font/fontello.ttf", iconsFontSize, &config, icons_ranges);
+	io.Fonts->Build();
+}
+
 static void initImGui(GLFWwindow* window)
 {
 	ImGui::CreateContext();
 	ImGui::StyleColorsDark();
 	ImGui_ImplGlfw_InitForVulkan(window, true);
-
-	auto& io = ImGui::GetIO();
-	ImFont* font = io.Fonts->AddFontDefault();
-	static const ImWchar icons_ranges[] = { 0xe8000, 0xf3ff, 0 };
-	ImFontConfig config;
-	config.MergeMode = true;
-	io.Fonts->AddFontFromFileTTF("assets/fontello/font/fontello.ttf", 18.0f, &config, icons_ranges);
-	io.Fonts->Build();
+	initImguiFonts(window, true);
 }
 
 static tk::WorldId mainWorld;
@@ -354,6 +368,7 @@ struct FilePreviews {
 
 		std::string path;
 		tg::RenderTargetId renderTarget;
+
 		VkDescriptorSet descSets[tvk::Swapchain::MAX_IMAGES] = {};
 		tk::WorldId world; // yes, each preview has it's own world!
 		tk::DefaultBasicWorldSystems systems;
@@ -437,10 +452,16 @@ struct FilePreviews {
 			const bool resized = newWindowSize != windowSize;
 			if (firstTime || resized) {
 				windowSize = newWindowSize;
-				if(firstTime)
-					renderTarget = tg::createRenderTarget({ .w = newWindowSize.x, .h = newWindowSize.y });
-				else
+				if (firstTime) {
+					renderTarget = tg::createRenderTarget({
+						.w = newWindowSize.x, .h = newWindowSize.y,
+						.autoRedraw = false,
+					});
+				}
+				else {
 					renderTarget.resize(newWindowSize.x, newWindowSize.y);
+					renderTarget.requestRedraw();
+				}
 				recreateDescSets();
 			}
 
@@ -455,6 +476,7 @@ struct FilePreviews {
 					glm::vec2 mouseDelta = mousePos - prevMousePos;
 					mouseDelta /= imgSize;
 					orbitCamera.rotate(mouseDelta.x, mouseDelta.y);
+					renderTarget.requestRedraw();
 				}
 			}
 			ImGui::End();
@@ -712,9 +734,12 @@ int main(int argc, char** argv)
 	tg::initRenderUniverse({ .instance = instance, .surface = surface, .screenW = u32(screenW), .screenH = u32(screenH), .enableImgui = imguiEnable });
 
 	mainWorld = tk::createWorld();
-	//defer(tk::destroyWorld());
-
 	systems = mainWorld->createDefaultBasicSystems();
+	defer(systems.destroy());
+	defer(tk::destroyWorld(mainWorld));
+
+	defer(filePreviews = {});
+
 	auto& pbrMgr = *tg::PbrMaterialManager::s_getOrCreate();
 	auto& RW = systems.system_render->RW;
 	auto& factory_renderable3d = systems.system_render->factory_renderable3d;

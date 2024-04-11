@@ -35,7 +35,12 @@ struct RenderTarget {
 	vk::ImageView depthBufferView[MAX_SWAPCHAIN_IMAGES];
 	VkFramebuffer framebuffer[MAX_SWAPCHAIN_IMAGES];
 	u32 w, h;
-	bool autoRedraw, needRedraw;
+	bool autoRedraw; // we can avoid redrawing everyframe if there are no changes
+	u8 needRedraw; // if !autoRedraw, "needRedraw" tells us if we need to redraw because it has been requested.
+		// Since there are use multiple images, we use an integer istead of a boolean.
+		// So this is how many frames we need to redraw. For example, if we are using triple-buffering,
+		// requesting to redraw would set "needRedraw" to 3, and each frame we would draw if(needRedraw > 0), and decrease needRedraw.
+		// We can also set needRedraw to -1 and... when the renderer sees -1 it will change it to the number of swapchain images
 };
 
 static constexpr u32 k_anisotropicFractionResolution = 4;
@@ -476,11 +481,17 @@ VkDescriptorPool DescPoolId::getHandleVk()const
 DescPoolId makeDescPool(const MakeDescPool& info)
 {
 	const u32 e = acquireDescPoolEntry();
-	const VkDescriptorPoolSize sizesPerType[] = {
-		{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, info.maxPerType.uniformBuffers},
-		{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, info.maxPerType.combinedImageSamplers},
+	std::array<VkDescriptorPoolSize, 2> sizesPerType;
+	u32 sizesPerType_n = 0;
+	auto addTypeSize = [&](VkDescriptorType type, u32 count) {
+		if (count) {
+			sizesPerType[sizesPerType_n] = { type, count };
+			sizesPerType_n++;
+		}
 	};
-	RU.descPools[e] = RU.device.createDescriptorPool(info.maxSets, sizesPerType, info.options);
+	addTypeSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, info.maxPerType.uniformBuffers);
+	addTypeSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, info.maxPerType.combinedImageSamplers);
+	RU.descPools[e] = RU.device.createDescriptorPool(info.maxSets, { sizesPerType.data(), sizesPerType_n }, info.options);
 	return { e };
 }
 
@@ -1346,10 +1357,11 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 	RU.shaderCompiler.init();
 
 	vk::ASSERT_VKRES(vk::createSwapchainSyncHelper(RU.swapchain, RU.surface, RU.device, RU.swapchainOptions));
+	const u32 numScImages = RU.swapchain.numImages;
 
 	RU.cmdPool = RU.device.createCmdPool(RU.queueFamily, { .transientCmdBuffers = true, .reseteableCmdBuffers = true });
-	RU.device.allocCmdBuffers(RU.cmdPool, RU.cmdBuffers_staging, false);
-	RU.device.allocCmdBuffers(RU.cmdPool, RU.cmdBuffers_draw, false);
+	RU.device.allocCmdBuffers(RU.cmdPool, { RU.cmdBuffers_staging, numScImages + 1}, false);
+	RU.device.allocCmdBuffers(RU.cmdPool, { RU.cmdBuffers_draw, numScImages }, false);
 	RU.cmdBuffers_staging_ind = 0;
 
 	{ // global descset layout
@@ -1384,7 +1396,7 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 			.DescriptorPool = RU.imgui.descPool.getHandleVk(),
 			.Subpass = 0,
 			.MinImageCount = RU.swapchainOptions.minImages,
-			.ImageCount = RU.swapchain.numImages,
+			.ImageCount = numScImages,
 			.MSAASamples = VkSampleCountFlagBits(RU.msaa),
 			.Allocator = VK_NULL_HANDLE,
 			.CheckVkResultFn = nullptr,
@@ -1463,6 +1475,7 @@ RenderWorldId createRenderWorld()
 void destroyRenderWorld(RenderWorldId id)
 {
 	RU.renderWorlds[id.id] = {};
+	releaseReusableEntry(RU.renderWorlds_nextFreeEntry, RU.renderWorlds, 0, id.id);
 }
 
 // RENDER TARGET
@@ -1495,7 +1508,7 @@ static void createRenderTarget_inPlace(RenderTargetId id, u32 w, u32 h)
 
 	rt.w = w;
 	rt.h = h;
-	rt.needRedraw = true;
+	rt.needRedraw = u8(-1);
 }
 
 static void destroyRenderTarget_inPlace(RenderTargetId id)
@@ -1559,7 +1572,7 @@ VkImageView RenderTargetId::getTextureImageViewVk(u32 scImgInd)
 
 void RenderTargetId::requestRedraw()
 {
-	RU.renderTargets[id].needRedraw = true;
+	RU.renderTargets[id].needRedraw = u8(-1);
 }
 
 void RenderTargetId::resize(u32 w, u32 h)
@@ -1691,6 +1704,7 @@ ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, u32 numInstances, 
 
 void RenderWorld::destroyObject(ObjectId oid)
 {
+	assert(id.isValid());
 	const u32 e = objects_id_to_entry[oid.id];
 	objects_info[e].mesh = MeshRC{};
 	//releaseObjectEntry(*this, e);
@@ -1909,8 +1923,10 @@ void draw(
 		const auto& pool = RU.descPools[poolI];
 		auto& descSets = RU.toDestroy.descSets[poolI][scImgInd];
 		auto& descSetsTmp = RU.toDestroy.descSetsTmp[poolI];
-		RU.device.freeDescriptorSets(pool, descSets);
-		descSets.clear();
+		if (descSets.size()) {
+			RU.device.freeDescriptorSets(pool, descSets);
+			descSets.clear();
+		}
 		std::swap(descSets, descSetsTmp);
 	}
 	RU.toDestroy.pushToTmp = false;
@@ -2093,9 +2109,16 @@ void draw(
 	for (u32 rtI = 0; rtI < u32(renderTargetsViewports.size()); rtI++) {
 		auto& rtv = renderTargetsViewports[rtI];
 		auto& rt = RU.renderTargets[rtv.renderTarget.id];
-		if (!rt.autoRedraw && !rt.needRedraw)
-			continue;
-		
+
+		if (!rt.autoRedraw) {
+			if (rt.needRedraw == 0)
+				continue;
+			else if (rt.needRedraw == u8(-1))
+				rt.needRedraw = RU.swapchain.numImages;
+
+			rt.needRedraw--;
+		}
+
 		//const vk::Image attachments[] = { rt.colorBuffer[scImgInd], rt.depthBuffer[scImgInd] };
 		//cmdBuffer_draw.cmd_pipelineBarrier_imagesToColorAttachment(RU.device, attachments);
 
@@ -2121,8 +2144,6 @@ void draw(
 		cmdBuffer_draw.cmd_endRenderPass();
 
 		//cmdBuffer_draw.cmd_pipelineBarrier_images_colorAttachment_to_shaderRead(RU.device, { &rt.colorBuffer[scImgInd], 1 });
-
-		rt.needRedraw = false;
 	}
 
 	// main - begin renderPass

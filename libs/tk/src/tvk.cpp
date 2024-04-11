@@ -517,19 +517,12 @@ void Device::allocCmdBuffers(VkCommandPool pool, std::span<CmdBuffer> cmdBuffers
 		.commandBufferCount = u32(cmdBuffers.size()),
 	};
 
-	VkCommandBuffer* cmdBuffersVk = (VkCommandBuffer*)cmdBuffers.data();
-#ifndef NDEBUG
-	// in debug  CmdBuffer had some debug member variables so the raw cast is not valid
-	std::vector<VkCommandBuffer> cmdBuffersVec(cmdBuffers.size());
-	cmdBuffersVk = cmdBuffersVec.data();
-#endif
+	tmp_cmdBuffers.resize(cmdBuffers.size());
 
-	ASSERT_VKRES(vkAllocateCommandBuffers(device, &info, cmdBuffersVk));
+	ASSERT_VKRES(vkAllocateCommandBuffers(device, &info, tmp_cmdBuffers.data()));
 
-#ifndef NDEBUG
 	for (size_t i = 0; i < cmdBuffers.size(); i++)
-		cmdBuffers[i].handle = cmdBuffersVec[i];
-#endif
+		cmdBuffers[i].handle = tmp_cmdBuffers[i];
 }
 
 VkDescriptorSetLayout Device::createDescriptorSetLayout(CSpan<DescriptorSetLayoutBindingInfo> bindings, DescriptorSetLayoutCreateFlags flags)
@@ -922,7 +915,7 @@ VkResult Device::createGraphicsPipelines(std::span<VkPipeline> pipelines, CSpan<
 	for (size_t i = 0; i < N; i++) {
 		const auto& info = infos[i];
 		u32 n = 0;
-		auto addStage = [&](VkShaderStageFlagBits stage, auto stageInfo) {
+		auto addStage = [&](VkShaderStageFlagBits stage, auto& stageInfo) {
 			if (stageInfo.shader.handle) {
 				stages.push_back(VkPipelineShaderStageCreateInfo{
 					.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -1140,6 +1133,17 @@ VkResult Device::createGraphicsPipelines(std::span<VkPipeline> pipelines, CSpan<
 		};
 		indStages += numStages[i];
 	}
+#if 0
+	printf("infos2.size(): %zd\n", infos2.size());
+	for (size_t i = 0; i < infos2.size(); i++) {
+		printf("infos2[%zd] = {\n", i);
+		printf("\t.sType = %d,\n", infos2[i].sType);
+		printf("\t.stageCount = %d,\n", infos2[i].stageCount);
+		printf("\t.pStages = %p,\n", infos2[i].pStages);
+		printf("\t.pVertexInputState = %p,\n", infos2[i].pVertexInputState);
+		printf("}\n");
+	}
+#endif
 	return vkCreateGraphicsPipelines(device, cache, infos2.size(), infos2.data(), nullptr, pipelines.data());
 }
 

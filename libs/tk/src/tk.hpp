@@ -20,9 +20,7 @@ struct WorldId {
     const World* operator->()const;
 };
 
-struct World;
-
-struct ComponentId {
+struct ComponentId { // not used?
     ComponentTypeU16 componentType;
     EntityTypeU16 entityType;
     u32 ind;
@@ -205,7 +203,7 @@ struct EntityFactory_Renderable3d : EntityFactory
         glm::vec3 position = glm::vec3(0);
         glm::quat rotation = glm::quat();
         glm::vec3 scale = glm::vec3(1);
-        bool separateMaterial = false;
+        bool separateMaterial = false; // if true: we create from a a geom+material, otherwise: we create fom a mesh
         union {
             struct {
                 gfx::GeomRC geom;
@@ -213,6 +211,7 @@ struct EntityFactory_Renderable3d : EntityFactory
             };
             gfx::MeshRC mesh;
         };
+        u32 expectedMaxInstances = 1;
         ~Create() {
             if (separateMaterial) {
                 geom.~RefCounted();
@@ -241,10 +240,6 @@ struct System_Render
     ~System_Render();
 
     void update(float dt);
-};
-
-struct SystemId_Render {
-    WorldId worldId;
 };
 
 // -- DefaultBasicWorldSystems --
