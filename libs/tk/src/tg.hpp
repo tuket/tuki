@@ -75,7 +75,8 @@ struct RefCounted {
         return *this;
     }
     ~RefCounted() { decRefCount(id); }
-    //operator->()
+
+    //IdType operator->() { return id; }
 };
 
 // we need to all this at the beginning of the application
@@ -469,6 +470,7 @@ void draw(
 );
 
 // imgui
+VkDescriptorSet createImGuiTextureDescSet(VkSampler sampler, ImageViewId imgView, VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 void imgui_newFrame();
 
 }

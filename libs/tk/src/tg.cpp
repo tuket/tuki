@@ -2220,6 +2220,13 @@ void draw(
 	begingStagingCmdRecordingForNextFrame();
 }
 
+// --- imgui ---
+VkDescriptorSet createImGuiTextureDescSet(VkSampler sampler, ImageViewId imgView, VkImageLayout layout)
+{
+	return ImGui_ImplVulkan_AddTexture(sampler, VkImageView(imgView.getInternalHandle()), layout);
+}
+
+
 void imgui_newFrame()
 {
 	if (!RU.imgui.enabled)

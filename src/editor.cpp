@@ -21,6 +21,8 @@ using tk::u32;
 
 static const bool imguiEnable = true;
 
+static const CStr k_imageFileExtensions[] = { ".png", ".jpg" };
+
 static u32 cubeInds[6*6] = {
 	0, 1, 3, 0, 3, 2,
 	4+0, 4+1, 4+3, 4+0, 4+3, 4+2,
@@ -309,6 +311,15 @@ static bool endsWith(std::string_view str, std::string_view ending)
 	return true;
 }
 
+template <typename Str>
+static int endsWithN(std::string_view str, CSpan<Str> endings)
+{
+	for (int i = 0; i < int(endings.size()); i++) {
+		if (endsWith(str, endings[i]))
+			return i;
+	}
+	return -1;
+}
 
 struct FilePreviews {
 	struct TextPreview {
@@ -338,6 +349,7 @@ struct FilePreviews {
 		tg::ImageViewRC imgView;
 		VkSampler sampler;
 		VkDescriptorSet descSet;
+		float aspectRatio = 0;
 
 		ImagePreview(CStr path)
 			: path(path)
@@ -345,20 +357,62 @@ struct FilePreviews {
 			img = tg::getOrLoadImage(path, true, true);
 			imgView = tg::makeImageView({.image = img});
 			sampler = tg::getAnisotropicFilteringSampler(1.f);
-			descSet = ImGui_ImplVulkan_AddTexture(sampler, (VkImageView)imgView.id.getInternalHandle(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+			descSet = tg::createImGuiTextureDescSet(sampler, imgView.id);
 		}
 
 		~ImagePreview() {
-			ImGui_ImplVulkan_RemoveTexture(descSet);
+			tg::releaseImguiDescSet(descSet);
+		}
+
+		static glm::vec2 calcInitialWindowSize(const tg::ImageInfo imgInfo)
+		{
+			float w = imgInfo.w;
+			float h = imgInfo.h;
+			float aspectRatio = w / h;
+			auto [W, H] = ImGui::GetIO().DisplaySize;
+			// we want to window size to occupy 1/4 of the screen in the smallest dimension
+			glm::vec2 res;
+			if (w / W < h / H) {
+				res.y = 0.25f * H;
+				res.x = res.y * aspectRatio;
+			}
+			else {
+				res.x = 0.25f * W;
+				res.y = res.x / aspectRatio;
+			}
+			return res;
+		}
+
+		static void windowResizeConstraintCallback(ImGuiSizeCallbackData* data)
+		{
+			auto imgPreview = (ImagePreview*)data->UserData;
+			const auto requestedSize = data->DesiredSize;
+			const float requestedArea = requestedSize.x * requestedSize.y;
+			const float y = sqrt(requestedArea / imgPreview->aspectRatio);
+			data->DesiredSize = glm::round(glm::vec2(imgPreview->aspectRatio * y, y));
 		}
 
 		bool draw()
 		{
+			const ImGuiWindowFlags windowFlags =
+				ImGuiWindowFlags_NoSavedSettings; // don't want to store window settings for each possible image!
+
+			const tg::ImageInfo imgInfo = img.id.getInfo();
+			
+			if (aspectRatio == 0) { // initial window size
+				const auto initialWindowSize = calcInitialWindowSize(imgInfo);
+				ImGui::SetNextWindowSize(initialWindowSize, ImGuiCond_Appearing);
+				aspectRatio = initialWindowSize.x / initialWindowSize.y;
+			}
+			
+			ImGui::SetNextWindowSizeConstraints(glm::vec2(32, 32), glm::vec2(10 << 10, 10 << 10), windowResizeConstraintCallback, this);
+
 			bool open = true;
-			ImGui::Begin(path.c_str(), &open);
-			const glm::vec2 imgSize = ImGui::GetContentRegionAvail();
-			ImGui::Image(descSet, imgSize);
+			ImGui::Begin(path.c_str(), &open, windowFlags);
+			const glm::vec2 contentSize = ImGui::GetContentRegionAvail();
+			ImGui::Image(descSet, contentSize);
 			ImGui::End();
+
 			return !open;
 		}
 	};
@@ -508,7 +562,7 @@ struct FilePreviews {
 		if (endsWith(path, ".txt")) {
 			textPreviews.emplace_back(path);
 		}
-		else if (endsWith(path, ".png")) {
+		else if (endsWithN(path, CSpan(k_imageFileExtensions)) != -1) {
 			imagePreviews.emplace_back(path);
 		}
 		else if (endsWith(path, ".geom")) {
@@ -593,7 +647,7 @@ static bool fileTreeNode(CStr label, CStr path, bool folder)
 		iconStr = opened ? iconCodes.openedFolder : iconCodes.closedFolder;
 	}
 	else {
-		if(endsWith(label, ".png"))
+		if(endsWithN(label, CSpan(k_imageFileExtensions)) != -1)
 			iconStr = iconCodes.imageFile;
 		else if (endsWith(label, ".txt"))
 			iconStr = iconCodes.textFile;
