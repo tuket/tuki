@@ -201,4 +201,16 @@ void PathBag::deleteEntry(u32 entry)
 	hashToEntry.erase(h);
 }
 
+// StackTmpAllocator
+static StackTmpAllocator s_stackTmpAllocator;
+
+void initStackTmpAllocator(size_t capacity)
+{
+	s_stackTmpAllocator = StackTmpAllocator(capacity);
+}
+StackTmpAllocator& getStackTmpAllocator()
+{
+	return s_stackTmpAllocator;
+}
+
 }

@@ -203,7 +203,7 @@ struct EntityFactory_Renderable3d : EntityFactory
         glm::vec3 position = glm::vec3(0);
         glm::quat rotation = glm::quat();
         glm::vec3 scale = glm::vec3(1);
-        bool separateMaterial = false; // if true: we create from a a geom+material, otherwise: we create fom a mesh
+        bool separateMaterial = false; // if true: we create from a a geom+material, otherwise: we create fom a meshSolid
         union {
             struct {
                 gfx::GeomRC geom;
@@ -235,6 +235,7 @@ struct System_Render
     gfx::RenderWorldId RW;
     EntityFactory_Renderable3d* factory_renderable3d;
     gfx::PbrMaterialManager* pbrMaterialManager = nullptr;
+    gfx::WireframeMaterialManager* wireframeMaterialMgr = nullptr;
 
     System_Render(WorldId worldId);
     ~System_Render();

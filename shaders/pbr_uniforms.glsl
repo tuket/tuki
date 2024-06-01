@@ -1,10 +1,6 @@
 #extension GL_EXT_scalar_block_layout : require
 
-#define DESCSET_GLOBAL 0
-#define DESCSET_MATERIAL 1
-#if 0
-    #define DESCSET_OBJECT 2
-#endif
+#include "desc_sets.glsl"
 
 struct DirLight {
     vec4 dir;
@@ -32,12 +28,4 @@ layout(set = DESCSET_MATERIAL, binding = 0) uniform MaterialUniforms {
 #endif
 #if HAS_METALLIC_RUGHNESS_TEX
     layout(set = DESCSET_MATERIAL, binding = 3) uniform sampler2D u_metallicRoughnessTex;
-#endif
-
-#if 0
-    layout(set = DESCSET_OBJECT, binding = 0) uniform ObjectUniforms {
-        mat4 u_model;
-        mat4 u_modelViewProj;
-        mat3 u_invTransModelView;
-    };
 #endif

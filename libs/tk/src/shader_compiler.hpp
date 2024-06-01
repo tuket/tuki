@@ -29,6 +29,7 @@ struct ShaderCompiler
 	shaderc_compiler_t compiler = nullptr;
 	std::string rootShadersPath = "";
 	CacheMap glslSrcsCache;
+	bool generateDebugInfo = false;
 
 	ShaderCompiler() {}
 	~ShaderCompiler();

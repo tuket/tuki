@@ -20,6 +20,7 @@ using tk::u8;
 using tk::u32;
 
 static const bool imguiEnable = true;
+static const bool generateShadersDebugInfo = true;
 
 static const CStr k_imageFileExtensions[] = { ".png", ".jpg" };
 
@@ -267,11 +268,11 @@ static void deleteSelectedEntities(tk::WorldId mainWorld)
 	std::fill(entitiesSelected.begin(), entitiesSelected.end(), false);
 }
 
-static void imgui_hierarchy(tk::WorldId mainWorld)
+static void imgui_hierarchy(tk::WorldId world)
 {
 	ZoneScoped;
 	ImGui::Begin("scene");
-	tk::EntityId e = mainWorld->getRootEntity().firstChild();
+	tk::EntityId e = world->getRootEntity().firstChild();
 	int i = 0;
 	tk::EntityId clicked = {};
 	while (e.valid()) {
@@ -321,6 +322,8 @@ static int endsWithN(std::string_view str, CSpan<Str> endings)
 	return -1;
 }
 
+typedef tk::UniqueResource<VkDescriptorSet, decltype([](VkDescriptorSet s) { tg::releaseImguiDescSet(s); }) > DescSet;
+
 struct FilePreviews {
 	struct TextPreview {
 		std::string path;
@@ -347,8 +350,8 @@ struct FilePreviews {
 		std::string path;
 		tg::ImageRC img;
 		tg::ImageViewRC imgView;
-		VkSampler sampler;
-		VkDescriptorSet descSet;
+		VkSampler sampler = VK_NULL_HANDLE;
+		DescSet descSet = VK_NULL_HANDLE;
 		float aspectRatio = 0;
 
 		ImagePreview(CStr path)
@@ -360,9 +363,11 @@ struct FilePreviews {
 			descSet = tg::createImGuiTextureDescSet(sampler, imgView.id);
 		}
 
-		~ImagePreview() {
-			tg::releaseImguiDescSet(descSet);
-		}
+		ImagePreview(const ImagePreview&) = delete;
+		ImagePreview(ImagePreview&& o) noexcept = default;
+		ImagePreview& operator=(ImagePreview&& o) noexcept = default;
+
+		~ImagePreview() = default;
 
 		static glm::vec2 calcInitialWindowSize(const tg::ImageInfo imgInfo)
 		{
@@ -410,7 +415,7 @@ struct FilePreviews {
 			bool open = true;
 			ImGui::Begin(path.c_str(), &open, windowFlags);
 			const glm::vec2 contentSize = ImGui::GetContentRegionAvail();
-			ImGui::Image(descSet, contentSize);
+			ImGui::Image(descSet.handle, contentSize);
 			ImGui::End();
 
 			return !open;
@@ -427,7 +432,8 @@ struct FilePreviews {
 		tk::WorldId world; // yes, each preview has it's own world!
 		tk::DefaultBasicWorldSystems systems;
 		tg::GeomRC geom;
-		tg::MeshRC mesh;
+		tg::MeshRC meshSolid;
+		tg::MeshRC meshWireframe;
 		tk::EntityId entity;
 		tk::OrbitCamera orbitCamera;
 		tk::PerspectiveCamera perspectiveCamera;
@@ -438,16 +444,18 @@ struct FilePreviews {
 		//std::vector<glm::vec3> verts_positions;
 		//std::vector<glm::vec2> 
 
-		GeomPreview(CStr path)
+		GeomPreview(CStr path, const tg::MaterialRC& solidMaterial, const tg::MaterialRC& wireframeMaterial)
 			: path(path)
 		{
 			world = tk::createWorld();
 			systems = world->createDefaultBasicSystems();
 			
 			geom = tg::geom_getOrLoadFromFile(path, &aabb);
-			mesh = tg::makeMesh({ .geom = geom, .material = geomMaterial() });
+			meshSolid = tg::makeMesh({ .geom = geom, .material = solidMaterial });
+			meshWireframe = tg::makeMesh({ .geom = geom, .material = wireframeMaterial });
 			auto& factory = *systems.system_render->factory_renderable3d; // world->getEntityFactory<tk::EntityFactory_Renderable3d>();
-			entity = factory.create({ .mesh = mesh });
+			//entity = factory.create({ .mesh = meshSolid });
+			entity = factory.create({ .mesh = meshWireframe });
 
 			orbitCamera.pivot = aabb.center();
 			orbitCamera.heading = 0.75f * glm::quarter_pi<float>();
@@ -509,7 +517,7 @@ struct FilePreviews {
 				if (firstTime) {
 					renderTarget = tg::createRenderTarget({
 						.w = newWindowSize.x, .h = newWindowSize.y,
-						.autoRedraw = false,
+						.autoRedraw = true,
 					});
 				}
 				else {
@@ -545,15 +553,26 @@ struct FilePreviews {
 	std::vector<ImagePreview> imagePreviews;
 	std::vector<GeomPreview> geomPreviews;
 
-	static tg::MaterialRC geomMaterialRC;
-	static tg::MaterialRC& geomMaterial()
+	tg::MaterialRC solidMaterialRC = tg::MaterialRC{};
+	tg::MaterialRC& solidMaterial()
 	{
-		if (!geomMaterialRC.id.isValid()) {
-			geomMaterialRC = systems.system_render->pbrMaterialManager->createMaterial({
-				.albedo = {243.f / 255.f, 237.f / 255.f, 120.f / 255.f, 1.f}
+		if (!solidMaterialRC.id.isValid()) {
+			solidMaterialRC = systems.system_render->pbrMaterialManager->createMaterial({
+				.albedo = {1, 1, 1, 1.f}
 			});
 		}
-		return geomMaterialRC;
+		return solidMaterialRC;
+	}
+
+	tg::MaterialRC wireframeMaterialRC = tg::MaterialRC{};
+	tg::MaterialRC& wireframeMaterial()
+	{
+		if (!wireframeMaterialRC.id.isValid()) {
+			wireframeMaterialRC = systems.system_render->wireframeMaterialMgr->createMaterial({
+				.color = {1, 0, 0, 1},
+			});
+		}
+		return wireframeMaterialRC;
 	}
 	
 	void openFilePreview(CStr path)
@@ -566,7 +585,7 @@ struct FilePreviews {
 			imagePreviews.emplace_back(path);
 		}
 		else if (endsWith(path, ".geom")) {
-			geomPreviews.emplace_back(path);
+			geomPreviews.emplace_back(path, solidMaterial(), wireframeMaterial());
 		}
 		else {
 			printf("this file can't be previewed\n");
@@ -629,7 +648,6 @@ struct FilePreviews {
 	}
 };
 static FilePreviews filePreviews;
-tg::MaterialRC FilePreviews::geomMaterialRC = tg::MaterialRC{};
 
 static bool fileTreeNode(CStr label, CStr path, bool folder)
 {
@@ -785,7 +803,10 @@ int main(int argc, char** argv)
 
 	tk::init(argv[0]);
 
-	tg::initRenderUniverse({ .instance = instance, .surface = surface, .screenW = u32(screenW), .screenH = u32(screenH), .enableImgui = imguiEnable });
+	tg::initRenderUniverse({
+		.instance = instance, .surface = surface, .screenW = u32(screenW), .screenH = u32(screenH),
+		.enableImgui = imguiEnable, .generateShadersDebugInfo = generateShadersDebugInfo
+	});
 
 	mainWorld = tk::createWorld();
 	systems = mainWorld->createDefaultBasicSystems();
@@ -797,6 +818,11 @@ int main(int argc, char** argv)
 	auto& pbrMgr = *tg::PbrMaterialManager::s_getOrCreate();
 	auto& RW = systems.system_render->RW;
 	auto& factory_renderable3d = systems.system_render->factory_renderable3d;
+
+	RW.createDirLight({
+		.dir = glm::normalize(glm::vec3(1,2,1)),
+		.color = glm::vec3(0.5, 0.5, 0.7),
+	});
 
 	CSpan<u8> cubeGeomData[] = { tk::asBytesSpan(cubeInds), tk::asBytesSpan(cubeVerts_positions), tk::asBytesSpan(cubeVerts_normals), tk::asBytesSpan(cubeVerts_colors) };
 	const tg::CreateGeomInfo cubeGeomInfo = {
@@ -845,8 +871,6 @@ int main(int argc, char** argv)
 			});
 		}
 	}
-
-	defer(FilePreviews::geomMaterialRC = tg::MaterialRC{});
 
 	glm::dvec2 prevMousePos;
 	glfwGetCursorPos(glfwWindow, &prevMousePos.x, &prevMousePos.y);

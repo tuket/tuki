@@ -10,10 +10,10 @@ namespace gfx {
 enum class ImageType : u8 {
     _1d, _2d, _3d, cube
 };
+typedef i8 WorldLayer;
 
 constexpr static u32 DESCSET_GLOBAL = 0;
 constexpr static u32 DESCSET_MATERIAL = 1;
-//constexpr static u32 DESCSET_OBJECT = 2;
 
 struct GlobalUniforms_Header {
     glm::vec3 ambientLight;
@@ -54,7 +54,7 @@ struct IdT {
 };
 typedef IdT<u32> IdU32;
 
-// Reference counted resource handles. Resources will be destroyed automaticaly once all the refereces are destroyed (RAII)
+// Reference counted resource handles. Resources will be destroyed automaticaly once all the refereces are destroyed (UniqueResource)
 template<typename IdType>
 struct RefCounted {
     IdType id;
@@ -85,6 +85,7 @@ struct InitRenderUniverseParams {
     VkSurfaceKHR surface;
     u32 screenW, screenH;
     bool enableImgui = false;
+    bool generateShadersDebugInfo = false;
 };
 void initRenderUniverse(const InitRenderUniverseParams& params);
 
@@ -303,6 +304,11 @@ struct PbrMaterialId : MaterialId {
 };
 DERIVED_MATERIAL_RC(PbrMaterial);
 
+struct WireframeMaterialId : MaterialId {
+    glm::vec4 getColor()const;
+};
+DERIVED_MATERIAL_RC(WireframeMaterial);
+
 struct PbrMaterialManager {
     MaterialManagerId managerId;
     u32 maxExpectedMaterials = 0;
@@ -326,15 +332,49 @@ struct PbrMaterialManager {
 
     PbrMaterialRC createMaterial(const PbrMaterialInfo& params);
     void destroyMaterial(MaterialId id);
+
     VkPipeline getPipeline(MaterialId materialId, GeomId geomId);
     VkPipelineLayout getPipelineLayout(MaterialId materialId);
     VkDescriptorSet getDescriptorSet(MaterialId materialId) { return materials_descSet[materialId.id]; }
 
     static PbrMaterialManager* s_getOrCreate(u32 maxExpectedMaterials = 4 << 10);
 
+    PbrMaterialManager(u32 maxExpectedMaterials);
+
     ~PbrMaterialManager() {
         printf("~PbrMaterialManager()\n");
     }
+};
+
+struct WireframeMaterialInfo {
+    glm::vec4 color;
+    //float thickness;
+};
+typedef WireframeMaterialInfo WireframeUniforms;
+
+struct WireframeMaterialManager {
+    MaterialManagerId managerId;
+    u32 maxExpectedMaterials = 0;
+    DescPoolId descPool;
+    VkDescriptorSetLayout descSetLayout;
+    VkPipelineLayout pipelineLayout;
+    VkPipeline pipeline;
+
+    std::vector<WireframeMaterialInfo> materials_info;
+    std::vector<VkDescriptorSet> materials_descSet;
+    vk::Buffer uniformBuffer; // a large uniform buffer contaning the data for all materials
+    u32 materials_nextFreeEntry = -1;
+
+    WireframeMaterialManager(u32 maxExpectedMaterials);
+
+    WireframeMaterialRC createMaterial(const WireframeMaterialInfo& params);
+    void destroyMaterial(MaterialId id);
+
+    VkPipeline getPipeline(MaterialId materialId, GeomId geomId) { return pipeline; }
+    VkPipelineLayout getPipelineLayout(MaterialId materialId) { return pipelineLayout; }
+    VkDescriptorSet getDescriptorSet(MaterialId materialId) { return materials_descSet[materialId.id]; }
+
+    static WireframeMaterialManager* s_getOrCreate(u32 maxExpectedMaterials = 4 << 10);
 };
 
 // MESH
@@ -366,12 +406,49 @@ struct ObjectId : IdU32 {
     ObjectId() : ObjectId(IdU32(-1), IdU32(-1)) {};
     ObjectId(IdU32 worldId, IdU32 id) : IdU32(id), _renderWorld(worldId) {}
     const RenderWorldId& renderWorld()const { return *(const RenderWorldId*)&_renderWorld; }
-    ObjectInfo getInfo()const;
+    const MeshRC& getMesh()const;
+    u32 getNumInstances()const;
+    u32 getNumAllocInstances()const;
+    WorldLayer& layer();
     void setModelMatrix(const glm::mat4& m, u32 instanceInd = 0);
     void setModelMatrices(CSpan<glm::mat4> matrices, u32 firstInstanceInd = 0);
     bool addInstances(u32 n);
     bool changeNumInstances(u32 n);
     void destroyInstance(u32 instanceInd);
+};
+
+struct PointLight {
+    glm::vec3 position = {0,0,0};
+    float maxDistance = 1;
+    glm::vec3 color = {1,1,1};
+    float halfDistIntensity = 0.5f; // [0, 1] how much intensity is left at maxDistance/2
+};
+
+struct DirLight {
+    glm::vec3 dir;
+    glm::vec3 color;
+};
+
+struct PointLightId : IdU32
+{
+    IdU32 _renderWorld = {};
+
+    PointLightId() : PointLightId(IdU32(-1), IdU32(-1)) {};
+    PointLightId(IdU32 worldId, IdU32 id) : IdU32(id), _renderWorld(worldId) {}
+    const RenderWorldId& renderWorld()const { return *(const RenderWorldId*)&_renderWorld; }
+
+    PointLight* operator->();
+};
+
+struct DirLightId : IdU32
+{
+    IdU32 _renderWorld = {};
+    
+    DirLightId() : DirLightId(IdU32(-1), IdU32(-1)) {};
+    DirLightId(IdU32 worldId, IdU32 id) : IdU32(id), _renderWorld(worldId) {}
+    const RenderWorldId& renderWorld()const { return *(const RenderWorldId*)&_renderWorld; }
+
+    DirLight* operator->();
 };
 
 // RENDER WORLDS
@@ -382,6 +459,12 @@ struct RenderWorldId : IdU32 {
     ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances = 0);
     ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances = 0);
     void destroyObject(ObjectId oid);
+
+    PointLightId createPointLight(const PointLight& l = {});
+    void destroyPointLight(PointLightId l);
+
+    DirLightId createDirLight(const DirLight& l = {});
+    void destroyDirLight(DirLightId l);
 
     void debugGui();
 };
@@ -394,29 +477,43 @@ struct RenderWorld {
 
     RenderWorldId id = {};
     std::vector<u32> objects_id_to_entry;
-    std::vector<u32> objects_entry_to_id;
-    std::vector<ObjectInfo> objects_info;
-    std::vector<u32> objects_firstModelMtx;
-    std::vector<glm::mat4> modelMatrices;
+    std::vector<u32> objects_entry_to_id[2]; // for all the following vectors that have two entries... this is because we use the second one as an intermediate buffer for sorting and deframentation operations. the [0] item is the current one
+    std::vector<MeshRC> objects_mesh[2];
+    std::vector<u32> objects_numInstances[2];
+    std::vector<u32> objects_numAllocInstances[2];
+    std::vector<WorldLayer> objects_layer[2];
+    std::vector<u32> objects_firstModelMtx[2];
+    std::vector<glm::mat4> modelMatrices[2];
     std::vector<ObjectMatrices> objects_matricesTmp;
-    std::vector<u32> objects_instancesCursorsTmp;
     u32 numObjects = 0;
     u32 objects_nextFreeId = u32(-1);
-    bool needDefragmentObjects = false;
+    bool needDefragmentObjects : 1 = false;
+    bool needResortObjects : 1 = false;
     std::vector<std::vector<std::vector<vk::Buffer>>> instancingBuffers; // [swapchainImgInd][renderTargetInd][viewportInd]
     std::vector<vk::Buffer> global_uniformBuffers;
     VkDescriptorPool global_descPool;
     VkDescriptorSetLayout global_descSetLayout;
     std::vector<VkDescriptorSet> global_descSets;
+    tk::EntriesArray<PointLight> pointLights;
+    tk::EntriesArray<DirLight> dirLights;
 
     // ** you can access the following members directly **
     glm::vec3 ambientLight = glm::vec3(0.1f);
+
+    auto objectsVecs(u32 i) { return make_refs_tuple(objects_entry_to_id[i], objects_mesh[i], objects_numInstances[i], objects_numAllocInstances[i], objects_layer[i], objects_firstModelMtx[i]); };
 
     ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1), u32 maxInstances = 0);
     ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances = 0);
     ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances = 0);
     void destroyObject(ObjectId oid);
-    void _defragmentObjects();
+    void _sortAndDefragmentObjects();
+
+    PointLightId createPointLight(const PointLight& l = {});
+    void destroyPointLight(PointLightId l);
+
+    DirLightId createDirLight(const DirLight& l = {});
+    void destroyDirLight(DirLightId l);
+
 };
 RenderWorldId createRenderWorld();
 void destroyRenderWorld(RenderWorldId id);

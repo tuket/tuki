@@ -4,6 +4,7 @@
 #include "tvk.hpp"
 #include "shader_compiler.hpp"
 #include <format>
+#include <algorithm>
 #include <physfs.h>
 
 #include <imgui_impl_glfw.h>
@@ -804,9 +805,33 @@ u32 registerMaterialManager(const MaterialManager& mgr)
 	return mgrId;
 }
 
+template <typename MgrT>
+u32 registerMaterialManagerT(MgrT* mgr)
+{
+	return registerMaterialManager({
+		.managerPtr = mgr,
+		.setManagerId = [](void* self, u32 id) {
+			((MgrT*)self)->managerId = { id };
+		},
+		.destroyMaterial = [](void* self, MaterialId id) {
+			((MgrT*)self)->destroyMaterial(id);
+		},
+		.getPipeline = [](void* self, MaterialId materialId, GeomId geomId) {
+			return ((MgrT*)self)->getPipeline(materialId, geomId);
+		},
+		.getPipelineLayout = [](void* self, MaterialId materialId) {
+			return ((MgrT*)self)->getPipelineLayout(materialId);
+		},
+		.getDescriptorSet = [](void* self, MaterialId materialId) {
+			return ((MgrT*)self)->getDescriptorSet(materialId);
+		},
+	});
+}
+
 // --- PBR MATERIAL ---
 
-static u32 acquireMaterialEntry(PbrMaterialManager& mgr)
+template<typename Mgr>
+static u32 acquireMaterialEntry(Mgr& mgr)
 {
 	const u32 e = acquireReusableEntry(mgr.materials_nextFreeEntry,
 		mgr.materials_info, 0, mgr.materials_descSet, RU.materials_refCount[mgr.managerId.id]);
@@ -814,7 +839,8 @@ static u32 acquireMaterialEntry(PbrMaterialManager& mgr)
 	return e;
 }
 
-void releaseMaterialEntry(PbrMaterialManager& mgr, u32 e)
+template<typename Mgr>
+void releaseMaterialEntry(Mgr& mgr, u32 e)
 {
 	releaseReusableEntry(mgr.materials_nextFreeEntry, mgr.materials_info, 0, e);
 }
@@ -863,6 +889,28 @@ VkPipelineLayout PbrMaterialManager::getCreatePipelineLayout(bool hasAlbedoTextu
 	return l;
 }
 
+struct CompiledVertFragShaders { vk::VertShader vertShad; vk::FragShader fragShad; };
+static CompiledVertFragShaders compileVertFragShaders(ZStrView vertShadPath, ZStrView fragShadPath, CSpan<tk::PreprocDefine> defines)
+{
+	const auto vertShad_compileResult = RU.shaderCompiler.glslToSpv(vertShadPath, defines);
+	if (!vertShad_compileResult.ok()) {
+		printf("Error compiling VERTEX shader (%s):\n%s\n", vertShadPath.c_str(), vertShad_compileResult.getErrorMsgs().c_str());
+		assert(false);
+		exit(1);
+	}
+	auto vertShad = RU.device.createVertShader(vertShad_compileResult.getSpirvSrc());
+
+	const auto fragShad_compileResult = RU.shaderCompiler.glslToSpv(fragShadPath, defines);
+	if (!fragShad_compileResult.ok()) {
+		printf("Error compiling FRAGMENT shader (%s):\n%s", fragShadPath.c_str(), fragShad_compileResult.getErrorMsgs().c_str());
+		assert(false);
+		exit(1);
+	}
+	auto fragShad = RU.device.createFragShader(fragShad_compileResult.getSpirvSrc());
+
+	return { vertShad, fragShad };
+}
+
 VkPipeline PbrMaterialManager::getCreatePipeline(bool hasAlbedoTexture, bool hasNormalTexture, bool hasMetallicRoughnessTexture,
 	HasVertexNormalsOrTangents hasVertexNormalsOrTangents, bool hasTexCoords, bool hasVertexColors, bool doubleSided)
 {
@@ -871,6 +919,9 @@ VkPipeline PbrMaterialManager::getCreatePipeline(bool hasAlbedoTexture, bool has
 	if (!p) {
 		const tk::PreprocDefine defines[] = {
 			{"MAX_DIR_LIGHTS", MAX_DIR_LIGHTS_STR.c_str()},
+			{"USE_MODEL_MTX", "1"},
+			{"USE_INV_TRANS_MODEL_MTX", "1"},
+			{"USES_POSITION_VARYING", "1"},
 			{"HAS_ALBEDO_TEX", hasTexCoords && hasAlbedoTexture ? "1" : "0"},
 			{"HAS_NORMAL_TEX", hasTexCoords && hasNormalTexture ? "1" : "0"},
 			{"HAS_METALLIC_ROUGHNESS_TEX", hasTexCoords && hasMetallicRoughnessTexture ? "1" : "0"},
@@ -880,24 +931,9 @@ VkPipeline PbrMaterialManager::getCreatePipeline(bool hasAlbedoTexture, bool has
 			{"HAS_VERTCOLOR_0", hasVertexColors ? "1" : "0"},
 		};
 
-		ZStrView vertShadPath = "shaders/pbr.vert.glsl";
+		ZStrView vertShadPath = "shaders/generic.vert.glsl";
 		ZStrView fragShadPath = "shaders/pbr.frag.glsl";
-
-		const auto vertShad_compileResult = RU.shaderCompiler.glslToSpv(vertShadPath, defines);
-		if (!vertShad_compileResult.ok()) {
-			printf("Error compiling VERTEX shader (%s):\n%s\n", vertShadPath.c_str(), vertShad_compileResult.getErrorMsgs().c_str());
-			assert(false);
-			exit(1);
-		}
-		auto vertShad = RU.device.createVertShader(vertShad_compileResult.getSpirvSrc());
-
-		const auto fragShad_compileResult = RU.shaderCompiler.glslToSpv(fragShadPath, defines);
-		if (!fragShad_compileResult.ok()) {
-			printf("Error compiling FRAGMENT shader (%s):\n%s", fragShadPath.c_str(), fragShad_compileResult.getErrorMsgs().c_str());
-			assert(false);
-			exit(1);
-		}
-		auto fragShad = RU.device.createFragShader(fragShad_compileResult.getSpirvSrc());
+		auto [vertShad, fragShad] = compileVertFragShaders(vertShadPath, fragShadPath, defines);
 
 		u32 numBindings = 1;
 		std::array<vk::VertexInputBindingInfo, 6> bindings;
@@ -945,6 +981,7 @@ VkPipeline PbrMaterialManager::getCreatePipeline(bool hasAlbedoTexture, bool has
 		//bindingLocation++;
 
 		std::array<vk::VertexInputAttribInfo, 20> attribs;
+		u32 offset = 0;
 		u32 numAttribs = 0;
 		auto addAttribMat4 = [&]() {
 			for (u32 colI = 0; colI < 4; colI++) {
@@ -952,8 +989,9 @@ VkPipeline PbrMaterialManager::getCreatePipeline(bool hasAlbedoTexture, bool has
 					.location = numAttribs,
 					.binding = 0,
 					.format = vk::Format::RGBA32_SFLOAT,
-					.offset = numAttribs * u32(sizeof(glm::vec4)),
+					.offset = offset,
 				};
+				offset += u32(sizeof(glm::vec4));
 			}
 		};
 		auto addAttribMat3 = [&]() {
@@ -962,8 +1000,9 @@ VkPipeline PbrMaterialManager::getCreatePipeline(bool hasAlbedoTexture, bool has
 					.location = numAttribs,
 					.binding = 0,
 					.format = vk::Format::RGB32_SFLOAT,
-					.offset = numAttribs * u32(sizeof(glm::vec3)),
+					.offset = offset,
 				};
+				offset += u32(sizeof(glm::vec3));
 			}
 		};
 
@@ -1127,14 +1166,20 @@ PbrMaterialManager* PbrMaterialManager::s_getOrCreate(u32 maxExpectedMaterials)
 	if (mgr)
 		return mgr;
 
-	assert(maxExpectedMaterials > 0);
-	mgr = new PbrMaterialManager;
-	mgr->maxExpectedMaterials = maxExpectedMaterials;
-	mgr->materials_info.reserve(maxExpectedMaterials);
-	mgr->materials_descSet.reserve(maxExpectedMaterials);
-	mgr->uniformBuffer = RU.device.createBuffer(vk::BufferUsage::uniformBuffer | vk::BufferUsage::transferDst, maxExpectedMaterials * sizeof(PbrUniforms), {});
+	mgr = new PbrMaterialManager(maxExpectedMaterials);
+	registerMaterialManagerT(mgr);
 
-	mgr->descPool = makeDescPool({
+	return mgr;
+}
+
+PbrMaterialManager::PbrMaterialManager(u32 maxExpectedMaterials)
+	: maxExpectedMaterials(maxExpectedMaterials)
+{
+	materials_info.reserve(maxExpectedMaterials);
+	materials_descSet.reserve(maxExpectedMaterials);
+	uniformBuffer = RU.device.createBuffer(vk::BufferUsage::uniformBuffer | vk::BufferUsage::transferDst, maxExpectedMaterials * sizeof(PbrUniforms), {});
+
+	descPool = makeDescPool({
 		.maxSets = maxExpectedMaterials,
 		.maxPerType = {
 			.uniformBuffers = maxExpectedMaterials,
@@ -1142,25 +1187,178 @@ PbrMaterialManager* PbrMaterialManager::s_getOrCreate(u32 maxExpectedMaterials)
 		},
 		.options = {.allowFreeIndividualSets = true}
 	});
+}
 
-	registerMaterialManager({
-		.managerPtr = mgr,
-		.setManagerId = [](void* self, u32 id) {
-			((PbrMaterialManager*)self)->managerId = { id };
+// --- WIREFRAME MATERIAL --
+
+WireframeMaterialManager::WireframeMaterialManager(u32 maxExpectedMaterials)
+	: maxExpectedMaterials(maxExpectedMaterials)
+{
+	// create descSetLayout
+	{
+		const vk::DescriptorSetLayoutBindingInfo bindings[] = {
+			{
+				.binding = 0,
+				.descriptorType = vk::DescriptorType::uniformBuffer,
+				.accessStages = vk::ShaderStages::fragment,
+			},
+			{
+				.binding = 1,
+				.descriptorType = vk::DescriptorType::combinedImageSampler,
+				.accessStages = vk::ShaderStages::fragment,
+			},
+			{
+				.binding = 2,
+				.descriptorType = vk::DescriptorType::combinedImageSampler,
+				.accessStages = vk::ShaderStages::fragment,
+			},
+			{
+				.binding = 3,
+				.descriptorType = vk::DescriptorType::combinedImageSampler,
+				.accessStages = vk::ShaderStages::fragment,
+			},
+		};
+		descSetLayout = RU.device.createDescriptorSetLayout(bindings);
+	}
+
+	// create pipelineLayout
+	{
+		const VkDescriptorSetLayout descSetLayouts[] = {
+			RU.globalDescSetLayout,
+			descSetLayout,
+		};
+		pipelineLayout = RU.device.createPipelineLayout(descSetLayouts, {});
+	}
+	
+	// create pipeline
+	{
+		const bool hasVertexColors = false; // TODO
+		const tk::PreprocDefine defines[] = {
+			{"HAS_VERTCOLOR_0", hasVertexColors ? "1" : "0"},
+		};
+
+		ZStrView vertShadPath = "shaders/wireframe.vert.glsl";
+		ZStrView fragShadPath = "shaders/wireframe.frag.glsl";
+		auto [vertShad, fragShad] = compileVertFragShaders(vertShadPath, fragShadPath, defines);
+
+		u32 numBindings = 1;
+		std::array<vk::VertexInputBindingInfo, 2> bindings;
+		bindings[0] = { // instancing data
+				.binding = 0,
+				.stride = sizeof(RenderWorld::ObjectMatrices),
+				.perInstance = true,
+		};
+		bindings[numBindings++] = { // a_position
+			.binding = numBindings,
+			.stride = sizeof(glm::vec3)
+		};
+
+		std::array<vk::VertexInputAttribInfo, 5> attribs;
+		u32 numAttribs = 0;
+		u32 location = 4;
+		// instance data matrices
+		u32 offset = offsetof(RenderWorld::ObjectMatrices, modelViewProj);
+		for (u32 colI = 0; colI < 4; colI++) {
+			attribs[numAttribs++] = {
+				.location = location++,
+				.binding = 0,
+				.format = vk::Format::RGBA32_SFLOAT,
+				.offset = offset,
+			};
+			offset += u32(sizeof(glm::vec4));
+		}
+
+		{
+			location = 11;
+			u32 bindingI = 1;
+			auto addAttribFmt = [&](vk::Format format) {
+				attribs[numAttribs++] = {
+					.location = location++,
+					.binding = bindingI,
+					.format = format,
+				};
+			};
+
+			addAttribFmt(vk::Format::RGB32_SFLOAT);
+		}
+
+		const vk::ColorBlendAttachment colorBlendAttachments[] = {
+			{} // no blending for now
+		};
+
+		const vk::GraphicsPipelineInfo info = {
+			.shaderStages = {
+				.vertex = {.shader = vertShad},
+				.fragment = {.shader = fragShad},
+			},
+			.vertexInputBindings = {&bindings[0], numBindings},
+			.vertexInputAttribs = {&attribs[0], numAttribs},
+			.polygonMode = vk::PolygonMode::line,
+			.cull_back = false,
+			.depthTestEnable = true,
+			.depthWriteEnable = true,
+			.colorBlendAttachments = colorBlendAttachments,
+			.layout = pipelineLayout,
+			.renderPass = RU.renderPass,
+		};
+		vk::ASSERT_VKRES(RU.device.createGraphicsPipelines({ &pipeline, 1 }, { &info, 1 }, nullptr));
+	}
+
+	// resources
+	materials_info.reserve(maxExpectedMaterials);
+	materials_descSet.reserve(maxExpectedMaterials);
+	uniformBuffer = RU.device.createBuffer(vk::BufferUsage::uniformBuffer | vk::BufferUsage::transferDst, maxExpectedMaterials * sizeof(WireframeUniforms), {});
+
+	descPool = makeDescPool({
+		.maxSets = maxExpectedMaterials,
+		.maxPerType = {
+			.uniformBuffers = maxExpectedMaterials,
 		},
-		.destroyMaterial = [](void* self, MaterialId id) {
-			((PbrMaterialManager*)self)->destroyMaterial(id);
-		},
-		.getPipeline = [](void* self, MaterialId materialId, GeomId geomId) {
-			return ((PbrMaterialManager*)self)->getPipeline(materialId, geomId);
-		},
-		.getPipelineLayout = [](void* self, MaterialId materialId) {
-			return ((PbrMaterialManager*)self)->getPipelineLayout(materialId);
-		},
-		.getDescriptorSet = [](void* self, MaterialId materialId) {
-			return ((PbrMaterialManager*)self)->getDescriptorSet(materialId);
-		},
+		.options = {.allowFreeIndividualSets = true}
 	});
+}
+
+WireframeMaterialRC WireframeMaterialManager::createMaterial(const WireframeMaterialInfo& params)
+{
+	VkDescriptorSet descSet;
+	vk::ASSERT_VKRES(RU.device.allocDescriptorSets(descPool.getHandleVk(), descSetLayout, { &descSet, 1 }));
+	const u32 entry = acquireMaterialEntry(*this);
+	materials_info[entry] = params;
+	materials_descSet[entry] = descSet;
+
+	const size_t bufferOffset = sizeof(WireframeUniforms) * entry;
+	const WireframeUniforms values = { .color = params.color };
+	stageData(uniformBuffer, tk::asBytesSpan(values), bufferOffset);
+
+	vk::DescriptorSetWrite descSetWrite = {
+		.descSet = descSet,
+		.binding = 0,
+		.type = vk::DescriptorType::uniformBuffer,
+		.bufferInfo = {
+			.buffer = RU.device.getVkHandle(uniformBuffer),
+			.offset = bufferOffset,
+			.range = sizeof(WireframeUniforms),
+		}
+	};
+
+	RU.device.writeDescriptorSets({ &descSetWrite, 1});
+	return WireframeMaterialRC(managerId, entry);
+}
+void WireframeMaterialManager::destroyMaterial(MaterialId id)
+{
+	materials_info[id.id] = {};
+	releaseDescSet(descPool, materials_descSet[id.id]);
+	releaseMaterialEntry(*this, id.id);
+}
+
+WireframeMaterialManager* WireframeMaterialManager::s_getOrCreate(u32 maxExpectedMaterials)
+{
+	static WireframeMaterialManager* mgr = nullptr;
+	if (mgr)
+		return mgr;
+
+	mgr = new WireframeMaterialManager(maxExpectedMaterials);
+	registerMaterialManagerT(mgr);
 
 	return mgr;
 }
@@ -1215,37 +1413,59 @@ MeshRC makeMesh(MeshInfo&& info)
 }
 
 // --- OBJECTS ---
-ObjectInfo ObjectId::getInfo()const
+const MeshRC& ObjectId::getMesh()const
 {
 	auto& RW = RU.renderWorlds[_renderWorld.id];
 	const u32 e = RW.objects_id_to_entry[id];
-	return RW.objects_info[e];
+	return RW.objects_mesh[0][e];
+}
+
+u32 ObjectId::getNumInstances()const
+{
+	auto& RW = RU.renderWorlds[_renderWorld.id];
+	const u32 e = RW.objects_id_to_entry[id];
+	return RW.objects_numInstances[0][e];
+}
+
+u32 ObjectId::getNumAllocInstances()const
+{
+	auto& RW = RU.renderWorlds[_renderWorld.id];
+	const u32 e = RW.objects_id_to_entry[id];
+	return RW.objects_numAllocInstances[0][e];
+}
+
+WorldLayer& ObjectId::layer()
+{
+	auto& RW = RU.renderWorlds[_renderWorld.id];
+	const u32 e = RW.objects_id_to_entry[id];
+	return RW.objects_layer[0][e];
 }
 
 void ObjectId::setModelMatrix(const glm::mat4& m, u32 instanceInd)
 {
 	auto& RW = RU.renderWorlds[_renderWorld.id];
 	const u32 e = RW.objects_id_to_entry[id];
-	assert(instanceInd < RW.objects_info[e].numInstances);
-	RW.modelMatrices[RW.objects_firstModelMtx[e] + instanceInd] = m;
+	assert(instanceInd < RW.objects_numInstances[0][e]);
+	RW.modelMatrices[0][RW.objects_firstModelMtx[0][e] + instanceInd] = m;
 }
 
 void ObjectId::setModelMatrices(CSpan<glm::mat4> matrices, u32 firstInstanceInd)
 {
 	auto& RW = RU.renderWorlds[_renderWorld.id];
 	const u32 e = RW.objects_id_to_entry[id];
-	assert(firstInstanceInd + matrices.size() <= RW.objects_info[e].numInstances);
+	assert(firstInstanceInd + matrices.size() <= RW.objects_numInstances[0][e]);
 	for (size_t i = 0; i < matrices.size(); i++)
-		RW.modelMatrices[RW.objects_firstModelMtx[e] + firstInstanceInd + i] = matrices[i];
+		RW.modelMatrices[0][RW.objects_firstModelMtx[0][e] + firstInstanceInd + i] = matrices[i];
 }
 
 bool ObjectId::addInstances(u32 n)
 {
 	auto& RW = RU.renderWorlds[_renderWorld.id];
 	const u32 e = RW.objects_id_to_entry[id];
-	auto& info = RW.objects_info[e];
-	if (info.numInstances + n <= info.maxInstances) {
-		info.numInstances += n;
+	auto& numInstances = RW.objects_numInstances[0][e];
+	auto& numAllocInstances = RW.objects_numAllocInstances[0][e];
+	if (numInstances + n <= numAllocInstances) {
+		numInstances += n;
 		return true;
 	}
 	return false;
@@ -1255,9 +1475,9 @@ bool ObjectId::changeNumInstances(u32 n)
 {
 	auto& RW = RU.renderWorlds[_renderWorld.id];
 	const u32 e = RW.objects_id_to_entry[id];
-	auto& info = RW.objects_info[e];
-	if (n <= info.maxInstances) {
-		info.numInstances = n;
+	auto& numInstances = RW.objects_numInstances[0][e];
+	if (n <= numInstances) {
+		numInstances = n;
 		return true;
 	}
 	return false;
@@ -1267,11 +1487,23 @@ void ObjectId::destroyInstance(u32 instanceInd)
 {
 	auto& RW = RU.renderWorlds[_renderWorld.id];
 	const u32 e = RW.objects_id_to_entry[id];
-	auto& info = RW.objects_info[e];
-	assert(instanceInd < info.numInstances);
-	const u32 fmm = RW.objects_firstModelMtx[e];
-	RW.modelMatrices[fmm + instanceInd] = RW.modelMatrices[fmm + info.numInstances - 1];
-	info.numInstances--;
+	auto& numInstances = RW.objects_numInstances[0][e];
+	assert(instanceInd < numInstances);
+	const u32 fmm = RW.objects_firstModelMtx[0][e];
+	RW.modelMatrices[fmm + instanceInd] = RW.modelMatrices[fmm + numInstances - 1];
+	numInstances--;
+}
+
+PointLight* PointLightId::operator->()
+{
+	auto& RW = RU.renderWorlds[_renderWorld.id];
+	return &RW.pointLights[id];
+}
+
+DirLight* DirLightId::operator->()
+{
+	auto& RW = RU.renderWorlds[_renderWorld.id];
+	return &RW.dirLights[id];
 }
 
 static void begingStagingCmdRecordingForNextFrame()
@@ -1355,6 +1587,7 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 	RU.renderPassOffscreen = makeRenderPass(vk::ImageLayout::shaderReadOnly);
 
 	RU.shaderCompiler.init();
+	RU.shaderCompiler.generateDebugInfo = params.generateShadersDebugInfo;
 
 	vk::ASSERT_VKRES(vk::createSwapchainSyncHelper(RU.swapchain, RU.surface, RU.device, RU.swapchainOptions));
 	const u32 numScImages = RU.swapchain.numImages;
@@ -1432,13 +1665,12 @@ RenderWorldId createRenderWorld()
 	const u32 entry = acquireRenderWorldEntry();
 	auto& RW = RU.renderWorlds[entry];
 	RW.id = { entry };
+
 	const u32 numExpectedObjects = 1 << 10;
-	RW.objects_id_to_entry.reserve(numExpectedObjects);
-	RW.objects_info.reserve(numExpectedObjects);
-	RW.objects_firstModelMtx.reserve(numExpectedObjects);
-	RW.modelMatrices.reserve(numExpectedObjects);
+	std::apply([](auto&... v) { (v.reserve(size_t(numExpectedObjects)), ...); }, RW.objectsVecs(0));
+	RW.modelMatrices[0].reserve(numExpectedObjects);
 	RW.objects_matricesTmp.reserve(numExpectedObjects);
-	RW.objects_instancesCursorsTmp.reserve(numExpectedObjects);
+
 	const u32 numScImages = RU.swapchain.numImages;
 	RW.instancingBuffers.resize(numScImages);
 	
@@ -1595,11 +1827,9 @@ u32 getCurrentSwapchainImageInd()
 
 static u32 acquireObjectEntry(RenderWorld& RW)
 {
-	// there wasn't a free entry; need to create one
-	const u32 e = RW.objects_info.size();
-	RW.objects_entry_to_id.emplace_back();
-	RW.objects_info.emplace_back();
-	RW.objects_firstModelMtx.emplace_back();
+	// we don't reuse entries because we will be defracmenting and resorting anyways
+	const u32 e = RW.objects_id_to_entry.size();
+	std::apply([](auto&... v) { (v.emplace_back(), ...); }, RW.objectsVecs(0));
 	return e;
 }
 
@@ -1640,6 +1870,24 @@ void RenderWorldId::destroyObject(ObjectId oid)
 	RU.renderWorlds[id].destroyObject(oid);
 }
 
+PointLightId RenderWorldId::createPointLight(const PointLight& l)
+{
+	return RU.renderWorlds[id].createPointLight(l);
+}
+void RenderWorldId::destroyPointLight(PointLightId l)
+{
+	RU.renderWorlds[id].destroyPointLight(l);
+}
+
+DirLightId RenderWorldId::createDirLight(const DirLight& l)
+{
+	return RU.renderWorlds[id].createDirLight(l);
+}
+void RenderWorldId::destroyDirLight(DirLightId l)
+{
+	RU.renderWorlds[id].destroyDirLight(l);
+}
+
 void RenderWorldId::debugGui()
 {
 	if (!RU.imgui.enabled)
@@ -1649,15 +1897,15 @@ void RenderWorldId::debugGui()
 	snprintf(windowLabel, std::size(windowLabel), "RenderWorld(%d)", id);
 	ImGui::Begin(windowLabel);
 	auto& RW = RU.renderWorlds[id];
-	for (u32 entry = 0; entry < RW.objects_entry_to_id.size(); entry++) {
-		const u32 id = RW.objects_entry_to_id[entry];
-		if (!RW.objects_info[entry].mesh.id.isValid())
+	for (u32 entry = 0; entry < RW.objects_entry_to_id[0].size(); entry++) {
+		const u32 id = RW.objects_entry_to_id[0][entry];
+		const auto meshId = RW.objects_mesh[0][entry].id;
+		if (!meshId.isValid())
 			continue;
-		const auto& info = RW.objects_info[entry];
 		if (ImGui::TreeNode((void*)uintptr_t(id), "%d", id)) {
-			ImGui::Text("Mesh: %d", info.mesh.id);
-			ImGui::Text("Max Instances: %d", info.maxInstances);
-			ImGui::Text("Num Instances: %d", info.numInstances);
+			ImGui::Text("Mesh: %d", meshId);
+			ImGui::Text("Num Alloc Instances: %d", RW.objects_numAllocInstances[entry]);
+			ImGui::Text("Num Instances: %d", RW.objects_numInstances[entry]);
 			ImGui::TreePop();
 		}
 	}
@@ -1665,94 +1913,216 @@ void RenderWorldId::debugGui()
 }
 
 template<bool PROVIDE_DATA>
-static ObjectId _createObjectWithInstancing(RenderWorld& RW, MeshRC mesh, u32 numInstances, const glm::mat4* instancesMatrices, u32 maxInstances)
+static ObjectId _createObjectWithInstancing(RenderWorld& RW, MeshRC mesh, u32 numInstances, const glm::mat4* instancesMatrices, u32 numAllocInstances, WorldLayer sortOrder)
 {
-	maxInstances = glm::max(maxInstances, numInstances);
+	numAllocInstances = glm::max(numAllocInstances, numInstances);
 	const u32 e = acquireObjectEntry(RW);
 	const u32 oid = acquireObjectId(RW);
-	RW.objects_entry_to_id[e] = oid;
 	RW.objects_id_to_entry[oid] = e;
-	RW.objects_info[e] = { mesh, numInstances, maxInstances };
-	RW.objects_firstModelMtx[e] = u32(RW.modelMatrices.size());
+	RW.objects_entry_to_id[0][e] = oid;
+	RW.objects_mesh[0][e] = mesh;
+	RW.objects_numInstances[0][e] = numInstances;
+	RW.objects_numAllocInstances[0][e] = numAllocInstances;
+	RW.objects_layer[0][e] = sortOrder;
+	const u32 firstModelMtx = u32(RW.modelMatrices[0].size());
+	RW.objects_firstModelMtx[0][e] = firstModelMtx;
+
+	const u32 newModelMatricesSize = firstModelMtx + numAllocInstances;
+	RW.modelMatrices[0].resize(newModelMatricesSize);
 	if constexpr (PROVIDE_DATA) {
 		for (u32 i = 0; i < numInstances; i++) {
 			const auto& m = instancesMatrices[i];
-			RW.modelMatrices.push_back(m);
+			RW.modelMatrices[0][i] = m;
 		}
-		RW.modelMatrices.resize(RW.modelMatrices.size() + maxInstances - numInstances);
 	}
-	else {
-		RW.modelMatrices.resize(RW.modelMatrices.size() + size_t(maxInstances));
-	}
+
 	return ObjectId(RW.id, { oid });
 }
 
 ObjectId RenderWorld::createObject(MeshRC mesh, const glm::mat4& modelMtx, u32 maxInstances)
 {
-	return _createObjectWithInstancing<true>(*this, std::move(mesh), 1, &modelMtx, maxInstances);
+	return _createObjectWithInstancing<true>(*this, std::move(mesh), 1, &modelMtx, maxInstances, 0);
 }
 
 ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances)
 {
-	return _createObjectWithInstancing<true>(*this, std::move(mesh), instancesMatrices.size(), instancesMatrices.data(), maxInstances);
+	return _createObjectWithInstancing<true>(*this, std::move(mesh), instancesMatrices.size(), instancesMatrices.data(), maxInstances, 0);
 }
 
 ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances)
 {
-	return _createObjectWithInstancing<false>(*this, std::move(mesh), numInstances, nullptr, maxInstances);
+	return _createObjectWithInstancing<false>(*this, std::move(mesh), numInstances, nullptr, maxInstances, 0);
+}
+
+PointLightId RenderWorld::createPointLight(const PointLight& l)
+{
+	const u32 id = pointLights.alloc();
+	pointLights[id] = l;
+	return PointLightId(this->id, { id });
+}
+void RenderWorld::destroyPointLight(PointLightId l)
+{
+	pointLights.free(l.id);
+}
+
+DirLightId RenderWorld::createDirLight(const DirLight& l)
+{
+	const u32 id = dirLights.alloc();
+	dirLights[id] = l;
+	return DirLightId(this->id, { id });
+}
+
+void RenderWorld::destroyDirLight(DirLightId l)
+{
+	dirLights.free(l.id);
 }
 
 void RenderWorld::destroyObject(ObjectId oid)
 {
 	assert(id.isValid());
 	const u32 e = objects_id_to_entry[oid.id];
-	objects_info[e].mesh = MeshRC{};
+	objects_mesh[0][e] = MeshRC{};
 	//releaseObjectEntry(*this, e);
 	releaseObjectId(*this, oid.id);
 	needDefragmentObjects = true;
 }
 
-void RenderWorld::_defragmentObjects()
+void RenderWorld::_sortAndDefragmentObjects()
 {
-	if (!needDefragmentObjects)
+	if (!needResortObjects && !needDefragmentObjects)
 		return;
 
-	u32 mtxI = 0;
-	u32 numObjs = objects_info.size();
-	u32 objI;
-	for (objI = 0; objI < numObjs; objI++) {
-		if (objects_info[objI].mesh.id.isValid())
-			mtxI += objects_info[objI].maxInstances;
-		else
-			break;
-	}
+	using Vecs = decltype(objectsVecs(0));
+	constexpr u32 numVecs = std::tuple_size_v<Vecs>;
+	Vecs vecs[] = { objectsVecs(0), objectsVecs(1) };
 
-	for (u32 objJ = objI + 1; objJ < numObjs; objJ++) {
-		auto& info = objects_info[objJ];
-		if (info.mesh.id.isValid()) {
-			const u32 firstModelMtx = objects_firstModelMtx[objJ];
-			const u32 numInstances = info.numInstances;
-			objects_info[objI] = std::move(info);
-			objects_firstModelMtx[objI] = mtxI;
-			const u32 oid = objects_entry_to_id[objJ];
-			objects_entry_to_id[objI] = oid;
-			objects_id_to_entry[oid] = objI;
-			const u32 nextObjMtxI = mtxI + info.maxInstances;
-			for (u32 i = 0; i < numInstances; i++) {
-				modelMatrices[mtxI] = modelMatrices[firstModelMtx + i];
-				mtxI++;
-			}
-			mtxI = nextObjMtxI;
+	// make space for copyging from vecs[0] to vecs[1] (conservatively high)
+	comptime_for<numVecs>([&]<size_t vi>() {
+		auto& vec0 = std::get<vi>(vecs[0]);
+		auto& vec1 = std::get<vi>(vecs[1]);
+		vec1.resize(vec0.size());
+	});
+	modelMatrices[1].resize(modelMatrices[0].size());
 
-			objI++;
+	auto remapObj = [&](u32 objI, u32 objJ, u32& mtxI)
+	{
+		const u32 firstModelMtx = objects_firstModelMtx[0][objJ];
+		const u32 numInstances = objects_numInstances[0][objJ];
+		const u32 maxInstances = objects_numAllocInstances[0][objJ];
+		const u32 oid = objects_entry_to_id[0][objJ];
+		comptime_for<numVecs-1>([&]<size_t vi>() { // -1 because we want to exclude objects_firstModelMtx
+			auto& vec0 = std::get<vi>(vecs[0]);
+			auto& vec1 = std::get<vi>(vecs[1]);
+			vec0[objI] = vec1[objJ];
+		});
+		objects_firstModelMtx[1][objI] = mtxI;
+
+		assert(objects_id_to_entry[oid] == objJ);
+		objects_id_to_entry[oid] = objI;
+		const u32 nextObjMtxI = mtxI + maxInstances;
+		for (u32 i = 0; i < numInstances; i++) {
+			modelMatrices[1][mtxI] = modelMatrices[0][firstModelMtx + i];
+			mtxI++;
 		}
+		mtxI = nextObjMtxI;
+	};
+
+	auto swapAndResizeVectors = [&](u32 numObjs, u32 numMatrices)
+	{
+		comptime_for<numVecs>([&]<size_t vi>() {
+			auto& vec0 = std::get<vi>(vecs[0]);
+			auto& vec1 = std::get<vi>(vecs[1]);
+			vec1.resize(numObjs);
+			std::swap(vec0, vec1);
+		});
+		modelMatrices[1].resize(numMatrices);
+		std::swap(modelMatrices[0], modelMatrices[1]);
+	};
+
+	const u32 N = objects_mesh[0].size();
+	if (!needResortObjects) // only need to defragment
+	{
+		u32 mtxI = 0;
+		u32 objI;
+		for (objI = 0; objI < N; objI++) {
+			if (objects_mesh[0][objI].id.isValid())
+				mtxI += objects_numAllocInstances[0][objI];
+			else
+				break;
+		}
+
+		for (u32 objJ = objI + 1; objJ < N; objJ++) {
+			if (objects_mesh[0][objJ].id.isValid()) {
+				remapObj(objI, objJ, mtxI);
+				objI++;
+			}
+		}
+
+		swapAndResizeVectors(objI, mtxI);
+	}
+	else // need toSort, and maybe also defragment
+	{
+		u32 n = 0;
+		bool sorted = true;
+		WorldLayer prev, min, max;
+		u32 i;
+		for (i = 0; i < N; i++) {
+			if (objects_mesh[0][i].id.isValid()) {
+				prev = min = max = objects_layer[0][i];
+				n++;
+				break;
+			}
+		}
+		for (; i < N; i++) {
+			if (objects_mesh[0][i].id.isValid()) {
+				sorted &= prev <= objects_layer[0][i];
+				prev = objects_layer[0][i];
+				min = std::min(min, prev);
+				max = std::max(max, prev);
+				n++;
+			}
+		}
+
+		if (sorted && !needDefragmentObjects)
+			return;
+
+		const u32 R = u32(max - min) + 1;
+		auto valOffsets_alloc = tk::getStackTmpAllocator().alloc<u32>(R);
+		auto valOffsets = std::span(valOffsets_alloc.ptr, R);
+		for (size_t i = 0; i < R; i++) {
+			if (objects_mesh[0][i].id.isValid()) {
+				const u32 ind = u32(objects_layer[0][i] - min);
+				valOffsets[ind]++;
+			}
+		}
+
+		u32 accum = 0;
+		for (u32 i = 0; i < N; i++) {
+			const u32 a = valOffsets[i];
+			valOffsets[i] = accum;
+			accum += a;
+		}
+
+		auto sortedIndices_alloc = tk::getStackTmpAllocator().alloc<u32>(n);
+		auto sortedIndices = std::span(sortedIndices_alloc.ptr, n);
+		for (u32 i = 0, j = 0; i < N; i++) {
+			if (objects_mesh[0][i].id.isValid()) {
+				const u32 ind = u32(objects_layer[0][i] - min);
+				sortedIndices[valOffsets[ind]++] = j;
+				j++;
+			}
+		}
+
+		// apply sorting order to all the objects vectors
+		u32 mtxI = 0;
+		for (u32 i = 0; i < n; i++) {
+			remapObj(i, sortedIndices[i], mtxI);
+		}
+
+		swapAndResizeVectors(n, mtxI);
 	}
 
-	objects_info.resize(objI);
-	objects_firstModelMtx.resize(objI);
-	objects_entry_to_id.resize(objI);
-	modelMatrices.resize(mtxI);
-	needDefragmentObjects = false;
+	needResortObjects = needDefragmentObjects = false;
 }
 
 // *** DRAW ***
@@ -1766,39 +2136,55 @@ static void draw_renderWorld(const RenderWorldViewport& rwViewport, u32 renderTa
 	auto& globalUnifBuffer = RW.global_uniformBuffers[scImgInd];
 	{
 		u8* data = RU.device.getBufferMemPtr(globalUnifBuffer);
+		const u32 numPointLights = u32(RW.pointLights.entries.size());
+		const u32 numDirLights = u32(RW.dirLights.entries.size());
 		const GlobalUniforms_Header header = {
-			.ambientLight = glm::vec3(0.5f),
-			.numDirLights = 0,
+			.ambientLight = glm::vec3(0.1f),
+			.numDirLights = numDirLights,
 		};
 		memcpy(data, &header, sizeof(header));
+
+		struct DirLightV4 {
+			glm::vec4 dir;
+			glm::vec4 color;
+		};
+		DirLightV4 dirLightsV4[MAX_DIR_LIGHTS]; // because the GPU has issues with 3-component vectors, we transform to vec4
+		for (u32 i = 0; i < numDirLights; i++) {
+			const DirLight& dl = RW.dirLights.entries[i];
+			dirLightsV4[i].dir = glm::vec4(dl.dir, 0);
+			dirLightsV4[i].color = glm::vec4(dl.color, 0);
+		}
+		memcpy(data + sizeof(header), dirLightsV4, sizeof(dirLightsV4)* numDirLights);
+
 		RU.device.flushBuffer(globalUnifBuffer);
 	}
 
-	RW._defragmentObjects();
+	RW._sortAndDefragmentObjects();
 
-	const size_t numObjects = RW.objects_info.size();
+	const size_t numObjects = RW.objects_entry_to_id[0].size();
 	u32 totalInstances = 0;
 	for (size_t objectI = 0; objectI < numObjects; objectI++) {
-		totalInstances += RW.objects_info[objectI].numInstances;
+		totalInstances += RW.objects_numInstances[0][objectI];
 	}
 	RW.objects_matricesTmp.resize(totalInstances);
 
 	const glm::mat4 viewProj = rwViewport.projMtx * rwViewport.viewMtx;
 	u32 instancesCursor_src = 0;
 	u32 instancesCursor_dst = 0;
-	RW.objects_instancesCursorsTmp.resize(numObjects);
+	auto objects_instancesCursors_alloc = tk::getStackTmpAllocator().alloc<u32>(numObjects);
+	std::span<u32> objects_instancesCursors(objects_instancesCursors_alloc.ptr, numObjects);
 	for (size_t objectI = 0; objectI < numObjects; objectI++) {
-		auto& objInfo = RW.objects_info[objectI];
-		for (size_t instanceI = 0; instanceI < objInfo.numInstances; instanceI++) {
-			const glm::mat4& modelMtx = RW.modelMatrices[instancesCursor_src + instanceI];
+		const auto numInstances = RW.objects_numInstances[0][objectI];
+		for (size_t instanceI = 0; instanceI < numInstances; instanceI++) {
+			const glm::mat4& modelMtx = RW.modelMatrices[0][instancesCursor_src + instanceI];
 			auto& Ms = RW.objects_matricesTmp[instancesCursor_dst + instanceI];
 			Ms.modelMtx = modelMtx;
 			Ms.modelViewProj = viewProj * modelMtx;
 			Ms.invTransModelView = glm::inverse(glm::transpose(modelMtx));
 		}
-		RW.objects_instancesCursorsTmp[objectI] = instancesCursor_dst;
-		instancesCursor_src += RW.objects_info[objectI].maxInstances;
-		instancesCursor_dst += RW.objects_info[objectI].numInstances;
+		objects_instancesCursors[objectI] = instancesCursor_dst;
+		instancesCursor_src += RW.objects_numAllocInstances[0][objectI];
+		instancesCursor_dst += RW.objects_numInstances[0][objectI];
 	}
 
 	const size_t instancingBufferRequiredSize = 3 * sizeof(glm::mat4) * size_t(totalInstances);
@@ -1836,8 +2222,7 @@ static void draw_renderWorld(const RenderWorldViewport& rwViewport, u32 renderTa
 	cmdBuffer_draw.cmd_scissor(rwViewport.scissor);
 
 	for (size_t objectI = 0; objectI < numObjects; objectI++) {
-		auto& objInfo = RW.objects_info[objectI];
-		auto meshId = objInfo.mesh.id;
+		auto meshId = RW.objects_mesh[0][objectI].id;
 		auto meshInfo = meshId.getInfo();
 		auto materialId = meshInfo.material.id;
 		
@@ -1851,7 +2236,7 @@ static void draw_renderWorld(const RenderWorldViewport& rwViewport, u32 renderTa
 		const auto geomBuffer = RU.device.getVkHandle(geomId.getBuffer());
 
 		// instancing buffer
-		cmdBuffer_draw.cmd_bindVertexBuffer(0, RU.device.getVkHandle(instancingBuffer), sizeof(RenderWorld::ObjectMatrices) * RW.objects_instancesCursorsTmp[objectI]);
+		cmdBuffer_draw.cmd_bindVertexBuffer(0, RU.device.getVkHandle(instancingBuffer), sizeof(RenderWorld::ObjectMatrices) * objects_instancesCursors[objectI]);
 		// positions
 		cmdBuffer_draw.cmd_bindVertexBuffer(1, geomBuffer, geomInfo.attribOffset_positions);
 		// normals
@@ -1868,12 +2253,13 @@ static void draw_renderWorld(const RenderWorldViewport& rwViewport, u32 renderTa
 			cmdBuffer_draw.cmd_bindVertexBuffer(5, geomBuffer, geomInfo.attribOffset_colors);
 
 		// index buffer
+		auto numInstances = RW.objects_numInstances[0][objectI];
 		if (geomInfo.indsOffset == u32(-1)) {
-			cmdBuffer_draw.cmd_draw(geomInfo.numVerts, objInfo.numInstances, 0, 0);
+			cmdBuffer_draw.cmd_draw(geomInfo.numVerts, numInstances, 0, 0);
 		}
 		else {
 			cmdBuffer_draw.cmd_bindIndexBuffer(geomBuffer, VK_INDEX_TYPE_UINT32, geomInfo.indsOffset);
-			cmdBuffer_draw.cmd_drawIndexed(geomInfo.numInds, objInfo.numInstances);
+			cmdBuffer_draw.cmd_drawIndexed(geomInfo.numInds, numInstances);
 		}
 	}
 }

@@ -1783,6 +1783,7 @@ VkResult createDevice(Device& device, VkInstance instance, const PhysicalDeviceI
 	}
 
 	const VkPhysicalDeviceFeatures features = {
+		.fillModeNonSolid = VK_TRUE,
 		.samplerAnisotropy = VK_TRUE,
 	};
 

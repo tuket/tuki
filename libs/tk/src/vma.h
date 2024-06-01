@@ -3984,7 +3984,7 @@ static void VmaAddDetailedStatistics(VmaDetailedStatistics& inoutStats, const Vm
 #endif // _VMA_STATISTICS_FUNCTIONS
 
 #ifndef _VMA_MUTEX_LOCK
-// Helper RAII class to lock a mutex in constructor and unlock it in destructor (at the end of scope).
+// Helper UniqueResource class to lock a mutex in constructor and unlock it in destructor (at the end of scope).
 struct VmaMutexLock
 {
     VMA_CLASS_NO_COPY_NO_MOVE(VmaMutexLock)
@@ -4000,7 +4000,7 @@ private:
     VMA_MUTEX* m_pMutex;
 };
 
-// Helper RAII class to lock a RW mutex in constructor and unlock it in destructor (at the end of scope), for reading.
+// Helper UniqueResource class to lock a RW mutex in constructor and unlock it in destructor (at the end of scope), for reading.
 struct VmaMutexLockRead
 {
     VMA_CLASS_NO_COPY_NO_MOVE(VmaMutexLockRead)
@@ -4016,7 +4016,7 @@ private:
     VMA_RW_MUTEX* m_pMutex;
 };
 
-// Helper RAII class to lock a RW mutex in constructor and unlock it in destructor (at the end of scope), for writing.
+// Helper UniqueResource class to lock a RW mutex in constructor and unlock it in destructor (at the end of scope), for writing.
 struct VmaMutexLockWrite
 {
     VMA_CLASS_NO_COPY_NO_MOVE(VmaMutexLockWrite)

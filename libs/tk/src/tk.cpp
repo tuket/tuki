@@ -9,6 +9,8 @@ namespace tk {
 
 bool init(CStr argv0, CStr rootShadersPath)
 {
+    tk::initStackTmpAllocator(16 << 20);
+
     if (!PHYSFS_init(argv0)) {
         printf("PHYSFS_init() failed!\n  reason: %s.\n", PHYSFS_getLastError());
         return false;
@@ -26,6 +28,7 @@ bool init(CStr argv0, CStr rootShadersPath)
     if (!PHYSFS_setWriteDir("data")) {
         printf("could not set the write dir\n");
     }
+
     return true;
 }
 
@@ -58,15 +61,16 @@ EntityId EntityFactory_Renderable3d::create(const Create& info)
         gfxObjectInd = _gfxObjectInd;
         auto& gfxObject = gfxObjects[gfxObjectInd];
         tg::ObjectId oldGfxObject = gfxObject;
-        auto gfxObjectInfo = gfxObject.getInfo();
-        instanceInd = gfxObjectInfo.numInstances;
-        gfxObjectInfo.numInstances++;
-        if (gfxObjectInfo.numInstances > gfxObjectInfo.maxInstances) {
-            const u32 newMaxInstances =
-                gfxObjectInfo.numInstances > 64 ? nextPowerOf2(gfxObjectInfo.numInstances) :
-                gfxObjectInfo.numInstances > 16 ? 64 :
-                gfxObjectInfo.numInstances > 4 ? 16 : 4;
-            auto newGfxObject = system_render.RW.createObjectWithInstancing(gfxObjectInfo.mesh, gfxObjectInfo.numInstances, newMaxInstances);
+        u32 numInstances = gfxObject.getNumInstances();
+        const u32 numAllocInstances = gfxObject.getNumAllocInstances();
+        instanceInd = numInstances;
+        numInstances++;
+        if (numInstances > numAllocInstances) {
+            const u32 newNumAllocInstances =
+                numInstances > 64 ? nextPowerOf2(numInstances) :
+                numInstances > 16 ? 64 :
+                numInstances > 4 ? 16 : 4;
+            auto newGfxObject = system_render.RW.createObjectWithInstancing(gfxObject.getMesh(), numInstances, newNumAllocInstances);
             gfxObject = newGfxObject;
             system_render.RW.destroyObject(oldGfxObject);
         }
@@ -199,6 +203,7 @@ System_Render::System_Render(WorldId worldId)
     : worldId(worldId)
 {
     pbrMaterialManager = gfx::PbrMaterialManager::s_getOrCreate();
+    wireframeMaterialMgr = gfx::WireframeMaterialManager::s_getOrCreate();
     RW = gfx::createRenderWorld();
     auto et = worldId->createAndRegisterEntityFactory<EntityFactory_Renderable3d>(*this);
     factory_renderable3d = (EntityFactory_Renderable3d*)worldId->entityFactories[et].get();

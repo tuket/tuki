@@ -109,6 +109,8 @@ CompileResult ShaderCompiler::glslToSpv(ZStrView filePath, CSpan<PreprocDefine> 
 		shaderc_compile_options_add_macro_definition(options, d.name.data(), d.name.length(), d.value.data(), d.value.length());
 
 	shaderc_compile_options_set_include_callbacks(options, include_resolve_callback, include_release_callback, this);
+	if (generateDebugInfo)
+		shaderc_compile_options_set_generate_debug_info(options);
 
 	auto it = getOrLoadGlsl(filePath);
 	if (it == glslSrcsCache.end()) {
