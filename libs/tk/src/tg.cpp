@@ -2013,7 +2013,7 @@ void RenderWorld::_sortAndDefragmentObjects()
 		comptime_for<numVecs-1>([&]<size_t vi>() { // -1 because we want to exclude objects_firstModelMtx
 			auto& vec0 = std::get<vi>(vecs[0]);
 			auto& vec1 = std::get<vi>(vecs[1]);
-			vec0[objI] = vec1[objJ];
+			vec1[objI] = vec0[objJ];
 		});
 		objects_firstModelMtx[1][objI] = mtxI;
 

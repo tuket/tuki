@@ -288,9 +288,9 @@ struct StackTmpAllocator
 
             auto& A = *stackAllocator;
             u8* aPtr = (u8*)A.data.get();
-            assert (Size((u8*)ptr - aPtr + sizeof(Size)) == A.top);
+            assert (Size((u8*)ptr - aPtr) == A.top + sizeof(Size));
             const u32 frameSize = *(Size*)(aPtr + A.top);
-            A.top -= frameSize + sizeof(Size);
+            A.top += frameSize + sizeof(Size);
         }
     };
 
