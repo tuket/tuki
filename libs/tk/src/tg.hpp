@@ -246,13 +246,20 @@ size_t geom_serializeToMem(const CreateGeomInfo& geomInfo, std::span<u8> data);
 bool geom_serializeToFile(const CreateGeomInfo& geomInfo, CStr dstPath);
 
 // MATERIAL
-struct MaterialManagerId : IdU32 {};
+enum class MaterialType : u8
+{
+    PBR,
+    WIREFRAME,
+
+    COUNT,
+    INVALID = 255,
+};
 struct MaterialId : IdU32
 {
-    MaterialManagerId manager; // TODO: we could pack everything in 32 bits: 8 for the managerId, 24 for the materialId
+    MaterialType type; // TODO: we could pack everything in 32 bits: 8 for the managerId, 24 for the materialId
 
-    MaterialId() : IdU32(), manager{} {}
-    MaterialId(MaterialManagerId manager, u32 id) : manager(manager), IdU32{ id } {}
+    MaterialId() : IdU32(), type{MaterialType::INVALID} {}
+    MaterialId(MaterialType type, u32 id) : type(type), IdU32{ id } {}
     VkPipeline getPipeline(GeomId geomId)const;
     VkPipelineLayout getPipelineLayout()const;
     VkDescriptorSet getDescSet()const;
@@ -265,18 +272,19 @@ typedef RefCounted<MaterialId> MaterialRC;
 
 #define DERIVED_MATERIAL_RC(T) \
     struct T##RC : MaterialRC { \
-        T##RC() : MaterialRC(MaterialId(MaterialManagerId{}, u32(-1))) {} \
-        T##RC(MaterialManagerId manager, u32 id = u32(-1)) : MaterialRC(MaterialId(manager, id)) {} \
+        T##RC() : MaterialRC(MaterialId(MaterialType::INVALID, u32(-1))) {} \
+        T##RC(MaterialType type, u32 id = u32(-1)) : MaterialRC(MaterialId(type, id)) {} \
     }
 
 struct MaterialManager {
     void* managerPtr;
-    void(*setManagerId)(void*, u32);
     void(*destroyMaterial)(void*, MaterialId);
     VkPipeline(*getPipeline)(void*, MaterialId, GeomId);
     VkPipelineLayout(*getPipelineLayout)(void*, MaterialId);
     VkDescriptorSet(*getDescriptorSet)(void*, MaterialId);
     //AttribLocations(*getAttibLocations)(void*, MaterialId);
+    
+    MaterialType& type() { return *(MaterialType*)managerPtr; }
 };
 u32 registerMaterialManager(const MaterialManager& backbacks);
 
@@ -314,7 +322,7 @@ struct WireframeMaterialId : MaterialId {
 DERIVED_MATERIAL_RC(WireframeMaterial);
 
 struct PbrMaterialManager {
-    MaterialManagerId managerId;
+    const MaterialType type = MaterialType::PBR;
     u32 maxExpectedMaterials = 0;
     DescPoolId descPool;
     VkDescriptorSetLayout descSetLayouts[/*hasAlbedoTexture*/ 2][/*hasNormalTexture*/ 2][/*hasMetallicRoughnessTexture*/ 2] = {};
@@ -357,7 +365,7 @@ struct WireframeMaterialInfo {
 typedef WireframeMaterialInfo WireframeUniforms;
 
 struct WireframeMaterialManager {
-    MaterialManagerId managerId;
+    const MaterialType type = MaterialType::WIREFRAME;
     u32 maxExpectedMaterials = 0;
     DescPoolId descPool;
     VkDescriptorSetLayout descSetLayout;

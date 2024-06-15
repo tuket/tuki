@@ -762,34 +762,36 @@ bool geom_serializeToFile(const CreateGeomInfo& geomInfo, CStr dstPath)
 
 VkPipeline MaterialId::getPipeline(GeomId geomId)const
 {
-	auto& mgr = RU.materialManagers[manager.id];
+	auto& mgr = RU.materialManagers[u32(type)];
 	return mgr.getPipeline(mgr.managerPtr, *this, geomId);
 }
 VkPipelineLayout MaterialId::getPipelineLayout()const
 {
-	auto& mgr = RU.materialManagers[manager.id];
+	auto& mgr = RU.materialManagers[u32(type)];
 	return mgr.getPipelineLayout(mgr.managerPtr, *this);
 }
 
 VkDescriptorSet MaterialId::getDescSet()const
 {
-	auto& mgr = RU.materialManagers[manager.id];
+	auto& mgr = RU.materialManagers[u32(type)];
 	return mgr.getDescriptorSet(mgr.managerPtr, *this);
 }
 
 void incRefCount(MaterialId id)
 {
 	if (id.isValid()) {
-		const auto& materialManagerFns = RU.materialManagers[id.manager.id];
-		u32& rc = RU.materials_refCount[id.manager.id][id.id];
+		const auto typeU = u32(id.type);
+		const auto& materialManagerFns = RU.materialManagers[typeU];
+		u32& rc = RU.materials_refCount[typeU][id.id];
 		rc++;
 	}
 }
 void decRefCount(MaterialId id)
 {
 	if (id.isValid()) {
-		const auto& materialManagerFns = RU.materialManagers[id.manager.id];
-		u32& rc = RU.materials_refCount[id.manager.id][id.id];
+		const auto& typeU = u32(id.type);
+		const auto& materialManagerFns = RU.materialManagers[typeU];
+		u32& rc = RU.materials_refCount[typeU][id.id];
 		rc--;
 		if (rc == 0)
 			materialManagerFns.destroyMaterial(materialManagerFns.managerPtr, id);
@@ -801,7 +803,6 @@ u32 registerMaterialManager(const MaterialManager& mgr)
 	const u32 mgrId = RU.materialManagers.size();
 	RU.materialManagers.push_back(mgr);
 	RU.materials_refCount.emplace_back();
-	mgr.setManagerId(mgr.managerPtr, mgrId);
 	return mgrId;
 }
 
@@ -810,9 +811,6 @@ u32 registerMaterialManagerT(MgrT* mgr)
 {
 	return registerMaterialManager({
 		.managerPtr = mgr,
-		.setManagerId = [](void* self, u32 id) {
-			((MgrT*)self)->managerId = { id };
-		},
 		.destroyMaterial = [](void* self, MaterialId id) {
 			((MgrT*)self)->destroyMaterial(id);
 		},
@@ -834,7 +832,7 @@ template<typename Mgr>
 static u32 acquireMaterialEntry(Mgr& mgr)
 {
 	const u32 e = acquireReusableEntry(mgr.materials_nextFreeEntry,
-		mgr.materials_info, 0, mgr.materials_descSet, RU.materials_refCount[mgr.managerId.id]);
+		mgr.materials_info, 0, mgr.materials_descSet, RU.materials_refCount[u32(mgr.type)]);
 	assert(e < mgr.maxExpectedMaterials);
 	return e;
 }
@@ -1124,7 +1122,7 @@ PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialInfo& params)
 	addWriteImgIfNeeded(params.metallicRoughnessImageView, 3);
 
 	RU.device.writeDescriptorSets({ descSetWrites, numWrites });
-	return PbrMaterialRC(managerId, entry);
+	return PbrMaterialRC(type, entry);
 }
 
 void PbrMaterialManager::destroyMaterial(MaterialId id)
@@ -1345,7 +1343,7 @@ WireframeMaterialRC WireframeMaterialManager::createMaterial(const WireframeMate
 	};
 
 	RU.device.writeDescriptorSets({ &descSetWrite, 1});
-	return WireframeMaterialRC(managerId, entry);
+	return WireframeMaterialRC(type, entry);
 }
 void WireframeMaterialManager::destroyMaterial(MaterialId id)
 {
