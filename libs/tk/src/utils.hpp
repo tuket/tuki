@@ -261,6 +261,14 @@ static constexpr T nextPowerOf2(T x) noexcept
     return x;
 }
 
+template <typename Int>
+static void appendBits(size_t& y, Int x, size_t numBits) {
+    using UInt = std::make_unsigned_t<Int>;
+    auto bits = size_t(*(UInt*)&x);
+    size_t mask = (size_t(1) << numBits) - size_t(1);
+    y = (y << numBits) | (bits & mask);
+}
+
 struct StackTmpAllocator
 {
     typedef u32 Size;

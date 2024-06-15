@@ -80,23 +80,23 @@ EntityId EntityFactory_Renderable3d::create(const Create& info)
     };
 
     if (info.separateMaterial) {
-        const u64 geomAndMaterial = (u64(info.geom.id.id) << u64(32)) | u64(info.material.id.id);
-        if (auto it = geomAndMaterial_to_gfxObjectInd.find(geomAndMaterial); it == geomAndMaterial_to_gfxObjectInd.end()) {
+        const auto key = Geom_Material_Layer{ info.geom.id, info.material.id, info.layer };
+        if (auto it = geomAndMaterial_to_gfxObjectInd.find(key); it == geomAndMaterial_to_gfxObjectInd.end()) {
             auto mesh = gfx::makeMesh({ .geom = info.geom, .material = info.material });
             gfxObjects.emplace_back(system_render.RW.createObject(mesh, glm::mat4(1), info.expectedMaxInstances));
             gfxObjectInd = u32(gfxObjects.size() - 1);
-            geomAndMaterial_to_gfxObjectInd[geomAndMaterial] = gfxObjectInd;
+            geomAndMaterial_to_gfxObjectInd[key] = gfxObjectInd;
         }
         else {
             addGfxObjectInstance(it->second);
         }
     }
     else {
-        const u32 meshInd = info.mesh.id.id;
-        if (auto it = mesh_to_gfxObjectInd.find(meshInd); it == mesh_to_gfxObjectInd.end()) {
+        auto key = Mesh_Layer{ info.mesh.id, info.layer };
+        if (auto it = mesh_to_gfxObjectInd.find(key); it == mesh_to_gfxObjectInd.end()) {
             gfxObjectInd = u32(gfxObjects.size());
             gfxObjects.emplace_back(system_render.RW.createObject(info.mesh));
-            mesh_to_gfxObjectInd[meshInd] = gfxObjectInd;
+            mesh_to_gfxObjectInd[key] = gfxObjectInd;
         }
         else {
             addGfxObjectInstance(it->second);

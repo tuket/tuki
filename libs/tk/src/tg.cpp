@@ -1063,6 +1063,7 @@ VkPipeline PbrMaterialManager::getCreatePipeline(bool hasAlbedoTexture, bool has
 			.depthTestEnable = true,
 			.depthWriteEnable = true,
 			.colorBlendAttachments = colorBlendAttachments,
+			//.depthBias = {.constantFactor = 1, .slopeFactor = 1, .clamp = 1},
 			.layout = getCreatePipelineLayout(hasAlbedoTexture, hasNormalTexture, hasMetallicRoughnessTexture),
 			.renderPass = RU.renderPass,
 		};
@@ -1297,7 +1298,9 @@ WireframeMaterialManager::WireframeMaterialManager(u32 maxExpectedMaterials)
 			.cull_back = false,
 			.depthTestEnable = true,
 			.depthWriteEnable = true,
+			.depthCompareOp = vk::CompareOp::less_or_equal, // so we can draw wireframes over "solid" objects
 			.colorBlendAttachments = colorBlendAttachments,
+			.depthBias = {-1, -1, -2},
 			.layout = pipelineLayout,
 			.renderPass = RU.renderPass,
 		};
@@ -1533,7 +1536,7 @@ void initRenderUniverse(const InitRenderUniverseParams& params)
 			.queueFamily = RU.queueFamily,
 			.queuePriorities = queuePriorities,
 		} };
-		vk::ASSERT_VKRES(vk::createDevice(RU.device, params.instance, bestPhysicalDeviceInfo, queuesInfos));
+		vk::ASSERT_VKRES(vk::createDevice(RU.device, params.instance, bestPhysicalDeviceInfo, queuesInfos, params.deviceFeatures));
 	}
 
 	const VkQueue mainQueue = RU.device.queues[0][0]; // TODO: more sofisticated queue handling, detect compute queues, transfer queues, etc
@@ -1853,17 +1856,17 @@ static void releaseObjectId(RenderWorld& RW, u32 id)
 	RW.objects_nextFreeId = id;
 }
 
-ObjectId RenderWorldId::createObject(MeshRC mesh, const glm::mat4& modelMtx, u32 maxInstances)
+ObjectId RenderWorldId::createObject(MeshRC mesh, const glm::mat4& modelMtx, u32 maxInstances, WorldLayer layer)
 {
 	return RU.renderWorlds[id].createObject(std::move(mesh), modelMtx, maxInstances);
 }
-ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances)
+ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances, WorldLayer layer)
 {
-	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), instancesMatrices, maxInstances);
+	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), instancesMatrices, maxInstances, layer);
 }
-ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances)
+ObjectId RenderWorldId::createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances, WorldLayer layer)
 {
-	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), numInstances, maxInstances);
+	return RU.renderWorlds[id].createObjectWithInstancing(std::move(mesh), numInstances, maxInstances, layer);
 }
 void RenderWorldId::destroyObject(ObjectId oid)
 {
@@ -1939,19 +1942,19 @@ static ObjectId _createObjectWithInstancing(RenderWorld& RW, MeshRC mesh, u32 nu
 	return ObjectId(RW.id, { oid });
 }
 
-ObjectId RenderWorld::createObject(MeshRC mesh, const glm::mat4& modelMtx, u32 maxInstances)
+ObjectId RenderWorld::createObject(MeshRC mesh, const glm::mat4& modelMtx, u32 maxInstances, WorldLayer layer)
 {
-	return _createObjectWithInstancing<true>(*this, std::move(mesh), 1, &modelMtx, maxInstances, 0);
+	return _createObjectWithInstancing<true>(*this, std::move(mesh), 1, &modelMtx, maxInstances, layer);
 }
 
-ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances)
+ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances, WorldLayer layer)
 {
-	return _createObjectWithInstancing<true>(*this, std::move(mesh), instancesMatrices.size(), instancesMatrices.data(), maxInstances, 0);
+	return _createObjectWithInstancing<true>(*this, std::move(mesh), instancesMatrices.size(), instancesMatrices.data(), maxInstances, layer);
 }
 
-ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances)
+ObjectId RenderWorld::createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances, WorldLayer layer)
 {
-	return _createObjectWithInstancing<false>(*this, std::move(mesh), numInstances, nullptr, maxInstances, 0);
+	return _createObjectWithInstancing<false>(*this, std::move(mesh), numInstances, nullptr, maxInstances, layer);
 }
 
 PointLightId RenderWorld::createPointLight(const PointLight& l)

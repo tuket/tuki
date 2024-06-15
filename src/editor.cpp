@@ -434,7 +434,8 @@ struct FilePreviews {
 		tg::GeomRC geom;
 		tg::MeshRC meshSolid;
 		tg::MeshRC meshWireframe;
-		tk::EntityId entity;
+		tk::EntityId entity_solid;
+		tk::EntityId entity_wireframe;
 		tk::OrbitCamera orbitCamera;
 		tk::PerspectiveCamera perspectiveCamera;
 		tk::AABB aabb;
@@ -454,8 +455,8 @@ struct FilePreviews {
 			meshSolid = tg::makeMesh({ .geom = geom, .material = solidMaterial });
 			meshWireframe = tg::makeMesh({ .geom = geom, .material = wireframeMaterial });
 			auto& factory = *systems.system_render->factory_renderable3d; // world->getEntityFactory<tk::EntityFactory_Renderable3d>();
-			//entity = factory.create({ .mesh = meshSolid });
-			entity = factory.create({ .mesh = meshWireframe });
+			entity_solid = factory.create({ .mesh = meshSolid });
+			entity_wireframe = factory.create({ .mesh = meshWireframe, .layer = 1 });
 
 			orbitCamera.pivot = aabb.center();
 			orbitCamera.heading = 0.75f * glm::quarter_pi<float>();

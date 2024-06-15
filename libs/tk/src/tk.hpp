@@ -4,6 +4,7 @@
 
 #include "tg.hpp"
 #include <glm/gtc/quaternion.hpp>
+#include <type_traits>
 
 namespace tk {
 
@@ -172,6 +173,36 @@ struct EntityFactory_Renderable3d : EntityFactory
         return id;
     }
 
+    struct Mesh_Layer {
+        gfx::MeshId meshId;
+        gfx::WorldLayer layer;
+
+        auto operator<=>(const Mesh_Layer&)const = default;
+    };
+    struct Geom_Material_Layer {
+        gfx::GeomId geomId;
+        gfx::MaterialId materialId;
+        gfx::WorldLayer layer;
+
+        auto operator<=>(const Geom_Material_Layer&)const = default;
+    };
+
+    struct Hasher {
+        size_t operator()(const Mesh_Layer& o) const {
+            size_t h = 0;
+            appendBits(h, o.layer, 8);
+            appendBits(h, o.meshId.id, 32);
+            return h;
+        }
+        size_t operator()(const Geom_Material_Layer& o)const {
+            size_t h = 0;
+            appendBits(h, o.layer, 8);
+            appendBits(h, o.materialId.id, 24);
+            appendBits(h, o.geomId.id, 32);
+            return h;
+        }
+    };
+
     static inline const ComponentTypeU16 k_componentTypes[] = {
         Component_Position3d::s_type(),
         Component_Rotation3d::s_type(),
@@ -189,8 +220,8 @@ struct EntityFactory_Renderable3d : EntityFactory
     
     std::vector<gfx::ObjectId> gfxObjects; // [gfxObjectInd]
 
-    std::unordered_map<u32, u32> mesh_to_gfxObjectInd;
-    std::unordered_map<u64, u32> geomAndMaterial_to_gfxObjectInd;
+    std::unordered_map<Mesh_Layer, u32, Hasher> mesh_to_gfxObjectInd;
+    std::unordered_map<Geom_Material_Layer, u32, Hasher> geomAndMaterial_to_gfxObjectInd;
 
     EntityFactory_Renderable3d(WorldId world, System_Render& system_render)
         : EntityFactory(world, "Renderable3d", k_componentTypes, s_releaseEntitiesFn, s_accessComponentByIndFn)
@@ -212,6 +243,7 @@ struct EntityFactory_Renderable3d : EntityFactory
             gfx::MeshRC mesh;
         };
         u32 expectedMaxInstances = 1;
+        gfx::WorldLayer layer = 0;
         ~Create() {
             if (separateMaterial) {
                 geom.~RefCounted();

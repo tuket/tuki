@@ -803,6 +803,13 @@ struct ColorBlendAttachment {
 	BlendOp alphaBlendOp : 3 = BlendOp::add;
 };
 
+struct DepthBias
+{
+	float constantFactor = 0;
+	float slopeFactor = 0;
+	float clamp = 0;
+};
+
 struct GraphicsPipelineInfo {
 	ShaderStagesInfo shaderStages;
 	CSpan<VertexInputBindingInfo> vertexInputBindings;
@@ -823,6 +830,7 @@ struct GraphicsPipelineInfo {
 	StencilOpState backStencilOpState = {};
 	CSpan<ColorBlendAttachment> colorBlendAttachments;
 	glm::vec4 blendConstant;
+	DepthBias depthBias;
 	PipelineDynamicStates dynamicStates = { .viewport = true, .scissor = true, };
 	VkPipelineLayout layout = VK_NULL_HANDLE;
 	VkRenderPass renderPass = VK_NULL_HANDLE;
@@ -1137,8 +1145,11 @@ struct PhysicalDeviceFilterAndCompare {
 // if there is no suitable device, returns infos.size()
 u32 chooseBestPhysicalDevice(CSpan<PhysicalDeviceInfo> infos, PhysicalDeviceFilterAndCompare fns);
 
+struct DeviceFeatures {
+	bool depthBiasClamp : 1 = false;
+};
 VkResult createDevice(Device& device, VkInstance instance, const PhysicalDeviceInfo& physicalDeviceInfo,
-	CSpan<QueuesCreateInfo> queuesInfos, CSpan<CStr> extensions = default_deviceExtensions);
+	CSpan<QueuesCreateInfo> queuesInfos, DeviceFeatures deviceFeatures, CSpan<CStr> extensions = default_deviceExtensions);
 
 // create a simple swapchain. If you need also help with synchronization use createSwapchainSynHelper instead
 VkResult createSwapchain(Swapchain& o, VkSurfaceKHR surface, Device& device, const SwapchainOptions& options);

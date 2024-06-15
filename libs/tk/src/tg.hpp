@@ -51,6 +51,7 @@ template <typename T>
 struct IdT {
     T id = T(-1);
     bool isValid()const { return id != T(-1); }
+    auto operator<=>(const IdT<T>&)const = default;
 };
 typedef IdT<u32> IdU32;
 
@@ -74,6 +75,7 @@ struct RefCounted {
         o.id = IdType{};
         return *this;
     }
+    bool operator==(const RefCounted<IdType>& o)const { return id == o.id; }
     ~RefCounted() { decRefCount(id); }
 
     //IdType operator->() { return id; }
@@ -84,8 +86,9 @@ struct InitRenderUniverseParams {
     VkInstance instance;
     VkSurfaceKHR surface;
     u32 screenW, screenH;
-    bool enableImgui = false;
-    bool generateShadersDebugInfo = false;
+    tk::vk::DeviceFeatures deviceFeatures = { .depthBiasClamp = true, };
+    bool enableImgui : 1 = false;
+    bool generateShadersDebugInfo : 1 = false;
 };
 void initRenderUniverse(const InitRenderUniverseParams& params);
 
@@ -214,6 +217,7 @@ struct GeomId : IdU32
     static constexpr GeomId invalid() { return GeomId{ u32(-1) }; }
     const GeomInfo& getInfo()const;
     vk::Buffer getBuffer()const;
+    auto operator<=>(const GeomId&)const = default;
 };
 void incRefCount(GeomId id);
 void decRefCount(GeomId id);
@@ -455,9 +459,9 @@ struct DirLightId : IdU32
 struct RenderWorld;
 
 struct RenderWorldId : IdU32 {
-    ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1), u32 maxInstances = 0);
-    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances = 0);
-    ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances = 0);
+    ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1), u32 maxInstances = 0, WorldLayer layer = 0);
+    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances = 0, WorldLayer layer = 0);
+    ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances = 0, WorldLayer layer = 0);
     void destroyObject(ObjectId oid);
 
     PointLightId createPointLight(const PointLight& l = {});
@@ -502,9 +506,9 @@ struct RenderWorld {
 
     auto objectsVecs(u32 i) { return make_refs_tuple(objects_entry_to_id[i], objects_mesh[i], objects_numInstances[i], objects_numAllocInstances[i], objects_layer[i], objects_firstModelMtx[i]); };
 
-    ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1), u32 maxInstances = 0);
-    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances = 0);
-    ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances = 0);
+    ObjectId createObject(MeshRC mesh, const glm::mat4& modelMtx = glm::mat4(1), u32 maxInstances = 0, WorldLayer layer = 0);
+    ObjectId createObjectWithInstancing(MeshRC mesh, CSpan<glm::mat4> instancesMatrices, u32 maxInstances = 0, WorldLayer layer = 0);
+    ObjectId createObjectWithInstancing(MeshRC mesh, u32 numInstances, u32 maxInstances = 0, WorldLayer layer = 0);
     void destroyObject(ObjectId oid);
     void _sortAndDefragmentObjects();
 

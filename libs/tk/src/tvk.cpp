@@ -1011,10 +1011,10 @@ VkResult Device::createGraphicsPipelines(std::span<VkPipeline> pipelines, CSpan<
 			.polygonMode = toVk(info.polygonMode),
 			.cullMode = VkCullModeFlags((info.cull_back ? VK_CULL_MODE_BACK_BIT : 0) | (info.cull_front ? VK_CULL_MODE_FRONT_BIT : 0)),
 			.frontFace = info.clockwiseFaces ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE,
-			.depthBiasEnable = VK_FALSE, // TODO
-			.depthBiasConstantFactor = 0, // TODO
-			.depthBiasClamp = 0, // TODO
-			.depthBiasSlopeFactor = 0, // TODO
+			.depthBiasEnable = info.depthBias.constantFactor != 0 || info.depthBias.slopeFactor != 0,
+			.depthBiasConstantFactor = info.depthBias.constantFactor,
+			.depthBiasClamp = info.depthBias.clamp,
+			.depthBiasSlopeFactor = info.depthBias.slopeFactor,
 			.lineWidth = 1, // TODO
 		};
 	}
@@ -1763,7 +1763,7 @@ u32 chooseBestPhysicalDevice(CSpan<PhysicalDeviceInfo> infos, PhysicalDeviceFilt
 }
 
 VkResult createDevice(Device& device, VkInstance instance, const PhysicalDeviceInfo& physicalDeviceInfo,
-	CSpan<QueuesCreateInfo> queuesInfos, CSpan<CStr> extensions)
+	CSpan<QueuesCreateInfo> queuesInfos, DeviceFeatures deviceFeatures, CSpan<CStr> extensions)
 {
 	assert(device.device == VK_NULL_HANDLE && "device created twice?");
 	device.instance = instance;
@@ -1783,6 +1783,7 @@ VkResult createDevice(Device& device, VkInstance instance, const PhysicalDeviceI
 	}
 
 	const VkPhysicalDeviceFeatures features = {
+		.depthBiasClamp = deviceFeatures.depthBiasClamp,
 		.fillModeNonSolid = VK_TRUE,
 		.samplerAnisotropy = VK_TRUE,
 	};
