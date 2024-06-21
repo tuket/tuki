@@ -126,8 +126,9 @@ struct RenderUniverse
 	PathBag geoms_pathBag;
 
 	// materials
-	std::vector<MaterialManager> materialManagers;
+	MaterialManager materialManagers[u32(MaterialType::COUNT)];
 	std::vector<std::vector<u32>> materials_refCount;
+	PathBag materials_pathBag;
 
 	// meshes
 	std::vector<MeshInfo> meshes_info;
@@ -762,25 +763,25 @@ bool geom_serializeToFile(const CreateGeomInfo& geomInfo, CStr dstPath)
 
 VkPipeline MaterialId::getPipeline(GeomId geomId)const
 {
-	auto& mgr = RU.materialManagers[u32(type)];
+	auto& mgr = RU.materialManagers[getTypeU32()];
 	return mgr.getPipeline(mgr.managerPtr, *this, geomId);
 }
 VkPipelineLayout MaterialId::getPipelineLayout()const
 {
-	auto& mgr = RU.materialManagers[u32(type)];
+	auto& mgr = RU.materialManagers[getTypeU32()];
 	return mgr.getPipelineLayout(mgr.managerPtr, *this);
 }
 
 VkDescriptorSet MaterialId::getDescSet()const
 {
-	auto& mgr = RU.materialManagers[u32(type)];
+	auto& mgr = RU.materialManagers[getTypeU32()];
 	return mgr.getDescriptorSet(mgr.managerPtr, *this);
 }
 
 void incRefCount(MaterialId id)
 {
 	if (id.isValid()) {
-		const auto typeU = u32(id.type);
+		const auto typeU = id.getTypeU32();
 		const auto& materialManagerFns = RU.materialManagers[typeU];
 		u32& rc = RU.materials_refCount[typeU][id.id];
 		rc++;
@@ -789,7 +790,7 @@ void incRefCount(MaterialId id)
 void decRefCount(MaterialId id)
 {
 	if (id.isValid()) {
-		const auto& typeU = u32(id.type);
+		const auto& typeU = u32(id.getType());
 		const auto& materialManagerFns = RU.materialManagers[typeU];
 		u32& rc = RU.materials_refCount[typeU][id.id];
 		rc--;
@@ -800,8 +801,8 @@ void decRefCount(MaterialId id)
 
 u32 registerMaterialManager(const MaterialManager& mgr)
 {
-	const u32 mgrId = RU.materialManagers.size();
-	RU.materialManagers.push_back(mgr);
+	const u32 mgrId = u32(mgr.type());
+	RU.materialManagers[mgrId] = mgr;
 	RU.materials_refCount.emplace_back();
 	return mgrId;
 }
@@ -809,7 +810,7 @@ u32 registerMaterialManager(const MaterialManager& mgr)
 template <typename MgrT>
 u32 registerMaterialManagerT(MgrT* mgr)
 {
-	return registerMaterialManager({
+	return registerMaterialManager(MaterialManager{
 		.managerPtr = mgr,
 		.destroyMaterial = [](void* self, MaterialId id) {
 			((MgrT*)self)->destroyMaterial(id);
@@ -823,7 +824,43 @@ u32 registerMaterialManagerT(MgrT* mgr)
 		.getDescriptorSet = [](void* self, MaterialId materialId) {
 			return ((MgrT*)self)->getDescriptorSet(materialId);
 		},
+		.deserialize = [](void* self, CSpan<u8> data) {
+			return ((MgrT*)self)->deserialize(data);
+		},
 	});
+}
+
+MaterialRC material_createFromMemFile(CSpan<u8> data)
+{
+	const auto materialType = *(MaterialType*)data.data();
+	const u32 materialTypeU = u32(materialType);
+	auto& mgr = RU.materialManagers[materialTypeU];
+	return mgr.deserialize(mgr.managerPtr, data);
+}
+
+static MaterialRC material_createFromFile(ZStrView path)
+{
+	auto file = PHYSFS_openRead(path);
+	if (!file)
+		return MaterialRC{};
+
+	auto len = PHYSFS_fileLength(file);
+	std::vector<u8> data(len);
+	PHYSFS_readBytes(file, data.data(), len);
+	return material_createFromMemFile(data);
+}
+
+MaterialRC material_getOrLoadFromFile(ZStrView path)
+{
+	if (u32 e = RU.materials_pathBag.getEntry(path); e != u32(-1)) {
+		return MaterialRC(MaterialId{ e });
+	}
+
+	MaterialRC materialId = material_createFromFile(path);
+
+	RU.materials_pathBag.addPath(path, materialId.id.id);
+
+	return materialId;
 }
 
 // --- PBR MATERIAL ---
@@ -1073,7 +1110,7 @@ VkPipeline PbrMaterialManager::getCreatePipeline(bool hasAlbedoTexture, bool has
 PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialInfo& params)
 {
 	const bool hasAlbedoTexture = params.albedoImageView.id.isValid();
-	const bool hasNormalTexture = params.normalImageView.id.isValid();
+	const bool hasNormalTexture = params.normalsImageView.id.isValid();
 	const bool hasMetallicRoughnessTexture = params.metallicRoughnessImageView.id.isValid();
 	const auto descSetLayout = getCreateDescriptorSetLayout(hasAlbedoTexture, hasNormalTexture, hasMetallicRoughnessTexture);
 	VkDescriptorSet descSet;
@@ -1118,7 +1155,7 @@ PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialInfo& params)
 		}
 	};
 	addWriteImgIfNeeded(params.albedoImageView, 1);
-	addWriteImgIfNeeded(params.normalImageView, 2);
+	addWriteImgIfNeeded(params.normalsImageView, 2);
 	addWriteImgIfNeeded(params.metallicRoughnessImageView, 3);
 
 	RU.device.writeDescriptorSets({ descSetWrites, numWrites });
@@ -1136,7 +1173,7 @@ VkPipeline PbrMaterialManager::getPipeline(MaterialId materialId, GeomId geomId)
 {
 	const auto& materialInfo = materials_info[materialId.id];
 	const bool hasAlbedoTexture = materialInfo.albedoImageView.id.isValid();
-	const bool hasNormalTexture = materialInfo.normalImageView.id.isValid();
+	const bool hasNormalTexture = materialInfo.normalsImageView.id.isValid();
 	const bool hasMetallicRoughnessTexture = materialInfo.metallicRoughnessImageView.id.isValid();
 
 	const auto& geomInfo = geomId.getInfo();
@@ -1154,9 +1191,130 @@ VkPipelineLayout PbrMaterialManager::getPipelineLayout(MaterialId materialId)
 {
 	const auto& materialInfo = materials_info[materialId.id];
 	const bool hasAlbedoTexture = materialInfo.albedoImageView.id.isValid();
-	const bool hasNormalTexture = materialInfo.normalImageView.id.isValid();
+	const bool hasNormalTexture = materialInfo.normalsImageView.id.isValid();
 	const bool hasMetallicRoughnessTexture = materialInfo.metallicRoughnessImageView.id.isValid();
 	return pipelineLayouts[hasAlbedoTexture][hasNormalTexture][hasMetallicRoughnessTexture];
+}
+
+enum class PbrFileFlags {
+	doubleSided,
+	generateMips_albedo,
+	generateMips_normals,
+	generateMips_metallicRoughness,
+};
+
+void PbrMaterialManager::serialize(const PbrMaterialSerializeInfo& info, u8* buffer, u32& size)
+{
+	const u32 capacity = size;
+	size =
+		sizeof(MaterialType) +
+		sizeof(info.albedo) +
+		sizeof(info.metallic) +
+		sizeof(info.roughness) +
+		sizeof(u32) + // flags
+		sizeof(u16) + info.albedoImage.length() +
+		sizeof(u16) + info.normalsImage.length() +
+		sizeof(u16) + info.metallicRoughnessImage.length() +
+		sizeof(info.anisotropicFiltering);
+
+	if (buffer == nullptr || capacity < size)
+		return;
+	
+	u32 offset = 0;
+	auto write = [&]<typename T>(const T& x) {
+		*(T*)(buffer + offset) = x;
+		offset += sizeof(T);
+	};
+	auto writeStr = [&](std::string_view str) {
+		write(u16(str.length()));
+		for (char c : str)
+			write(c);
+	};
+
+	u32 flags = 0;
+	auto considerFlag = [&flags](PbrFileFlags flag, bool enable) {
+		if (enable)
+			flags |= u32(1) << u32(flag);
+	};
+	considerFlag(PbrFileFlags::doubleSided, info.doubleSided);
+	considerFlag(PbrFileFlags::generateMips_albedo, info.generateMips_albedo);
+	considerFlag(PbrFileFlags::generateMips_normals, info.generateMips_normals);
+	considerFlag(PbrFileFlags::generateMips_metallicRoughness, info.generateMips_metallicRoughness);
+
+	write(MaterialType::PBR);
+	write(info.albedo);
+	write(info.metallic);
+	write(info.roughness);
+	write(flags);
+	writeStr(info.albedoImage);
+	writeStr(info.normalsImage);
+	writeStr(info.metallicRoughnessImage);
+	write(info.anisotropicFiltering);
+}
+
+tk::SaveFileResult PbrMaterialManager::serializeToFile(const PbrMaterialSerializeInfo& info, ZStrView path)
+{
+	u32 size = 0;
+	serialize(info, nullptr, size);
+	auto buffer_alloc = tk::getStackTmpAllocator().alloc<u8>(size);
+	serialize(info, buffer_alloc.ptr, size);
+
+	return tk::saveBinaryFile({ buffer_alloc.ptr, size }, path);
+}
+
+MaterialRC PbrMaterialManager::deserialize(CSpan<u8> data)
+{
+	PbrMaterialInfo materialInfo;
+	u32 offset = 0;
+	auto read = [&]<typename T>(T& x) {
+		x = *(T*)(data.data() + offset);
+		offset += sizeof(T);
+	};
+	auto readStr = [&](std::string_view& str) {
+		u16 n;
+		read(n);
+		const char* s = (const char*)(data.data() + offset);
+		str = std::string_view(s, n);
+		offset += n;
+	};
+
+#ifdef NDEBUG
+	offset = sizeof(MaterialType);
+#else
+	MaterialType type;
+	read(type);
+	assert(type == MaterialType::PBR);
+#endif
+
+	read(materialInfo.albedo);
+	read(materialInfo.metallic);
+	read(materialInfo.roughness);
+
+	u32 flags;
+	read(flags);
+	auto getFlag = [&flags](PbrFileFlags i) { return flags & (u32(1) << u32(i)); };
+
+	auto readImage = [&](ImageViewRC& imageView, bool srgb, bool generateMips) {
+		std::string_view path;
+		readStr(path);
+		if (path.empty())
+			return;
+		
+		auto img = getOrLoadImage(Path(path), srgb, generateMips);
+		if (!img.id.isValid())
+			return;
+
+		imageView = makeImageView({.image = img});
+	};
+
+	readImage(materialInfo.albedoImageView, true, getFlag(PbrFileFlags::generateMips_albedo));
+	readImage(materialInfo.normalsImageView, false, getFlag(PbrFileFlags::generateMips_normals));
+	readImage(materialInfo.metallicRoughnessImageView, false, getFlag(PbrFileFlags::generateMips_metallicRoughness));
+
+	read(materialInfo.anisotropicFiltering);
+	materialInfo.doubleSided = getFlag(PbrFileFlags::doubleSided);
+
+	return createMaterial(materialInfo);
 }
 
 PbrMaterialManager* PbrMaterialManager::s_getOrCreate(u32 maxExpectedMaterials)
@@ -1350,6 +1508,31 @@ void WireframeMaterialManager::destroyMaterial(MaterialId id)
 	materials_info[id.id] = {};
 	releaseDescSet(descPool, materials_descSet[id.id]);
 	releaseMaterialEntry(*this, id.id);
+}
+
+void WireframeMaterialManager::serialize(const WireframeMaterialSerializeInfo& info, u8* buffer, u32& size)
+{
+	u32 capacity = size;
+	size =
+		sizeof(MaterialType) +
+		sizeof(info.color);
+
+	if (buffer == nullptr || capacity < size)
+		return;
+
+	u32 offset = 0;
+	auto write = [&]<typename T>(const T & x) {
+		*(T*)(buffer + offset) = x;
+		offset += sizeof(T);
+	};
+
+	write(MaterialType::WIREFRAME);
+	write(info.color);
+}
+
+MaterialRC WireframeMaterialManager::deserialize(CSpan<u8> data)
+{
+	return MaterialRC{};
 }
 
 WireframeMaterialManager* WireframeMaterialManager::s_getOrCreate(u32 maxExpectedMaterials)

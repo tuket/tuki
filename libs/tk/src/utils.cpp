@@ -161,6 +161,17 @@ LoadedBinaryFile loadBinaryFile(CStr path)
 	return { size_t(fileLen), fileData };
 }
 
+SaveFileResult saveBinaryFile(CSpan<u8> data, ZStrView path)
+{
+	auto file = PHYSFS_openWrite(path);
+	if (!file)
+		return SaveFileResult::cant_open;
+	defer(PHYSFS_close(file));
+
+	const size_t bytesWritten = PHYSFS_writeBytes(file, data.data(), data.size());
+	return bytesWritten == data.size() ? SaveFileResult::ok : SaveFileResult::cant_write;
+}
+
 static std::array<u64, 4> k_hashingSecret = []() {
 	std::array<u64, 4> sec;
 	make_secret(42382348, sec.data());
@@ -172,7 +183,6 @@ static u64 hash(std::string_view s) {
 }
 
 // -- PathBag --
-
 u32 PathBag::getEntry(std::string_view path)const
 {
 	const u64 h = hash(path);

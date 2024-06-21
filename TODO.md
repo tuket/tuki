@@ -1,0 +1,7 @@
+- Allow retrieving a PbrMaterialSerializeInfo from a file, and then create a material from it
+- WireframeMaterial (de)serialization 
+- Material editor and preview
+- Support external or embedded textures
+- Support .mesh files, with embedded or external .geom's and .mtrl's
+- Format specification
+- Add version numbering

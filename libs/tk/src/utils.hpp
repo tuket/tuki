@@ -35,6 +35,7 @@ struct ZStrView : public std::string_view {
     ZStrView() {}
     ZStrView(std::string_view s) = delete;
     ZStrView(const char* s) : std::string_view(s) {}
+    ZStrView(const char* s, size_t len) : std::string_view(s, len) {}
     ZStrView(const std::string& s) : std::string_view(s) {}
 
     operator const char* ()const { return data(); }
@@ -145,6 +146,30 @@ struct LoadedBinaryFile {
 };
  LoadedBinaryFile loadBinaryFile(CStr path);
 
+ struct SaveFileResult {
+    enum Code : u8 {
+        ok,
+        cant_open,
+        cant_write
+    };
+    Code code;
+
+    SaveFileResult(Code c = ok) : code(c) {}
+    operator bool()const { return code == ok; }
+    bool operator == (SaveFileResult::Code c)const { return code == c; }
+ };
+ SaveFileResult saveBinaryFile(CSpan<u8> data, ZStrView path);
+
+ // This is basically a dictionary of string -> u32
+ // It's used for caching loaded files
+ // Why not just use std::unordered_map<std::string, u32>?
+ // 1) Performance:
+ //     - We don't compare strings, just the hashes
+ //     - Use a faster hash function provided by the wyhash library
+ //     - Use of std::string_view
+ //     - Querying for a path would imply having to create a new std::string if we don't have one, whch is expensive since it requires allating memory
+ // 2) Bidirectionality:
+ //     - We can easy get the path from the entry, just by looking up the "paths" array
 struct PathBag
 {
     std::vector<std::string> paths;
@@ -303,6 +328,7 @@ struct StackTmpAllocator
     };
 
     template <typename T>
+    [[nodiscard]]
     AutoDelete<T> alloc(Size len)
     {
         const size_t sizeT = len * sizeof(T);

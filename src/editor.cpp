@@ -215,6 +215,7 @@ struct IconCodes {
 	Code imageFile = "\xEE\xA0\x99";
 	Code textFile = "\xEF\x83\xB6";
 	Code geomFile = "\xEF\x88\x99";
+	Code materialFile = "\xEF\x87\xBC";
 };
 static constexpr IconCodes iconCodes{};
 
@@ -666,12 +667,14 @@ static bool fileTreeNode(CStr label, CStr path, bool folder)
 		iconStr = opened ? iconCodes.openedFolder : iconCodes.closedFolder;
 	}
 	else {
-		if(endsWithN(label, CSpan(k_imageFileExtensions)) != -1)
+		if (endsWithN(label, CSpan(k_imageFileExtensions)) != -1)
 			iconStr = iconCodes.imageFile;
 		else if (endsWith(label, ".txt"))
 			iconStr = iconCodes.textFile;
 		else if (endsWith(label, ".geom"))
 			iconStr = iconCodes.geomFile;
+		else if (endsWith(label, ".mtrl"))
+			iconStr = iconCodes.materialFile;
 		else
 			iconStr = iconCodes.genericFile;
 	}
@@ -825,6 +828,12 @@ int main(int argc, char** argv)
 		.color = glm::vec3(0.5, 0.5, 0.7),
 	});
 
+	pbrMgr.serializeToFile({
+		.albedo = {1, 0, 0, 1},
+		.albedoImage = "crate.png",
+		.anisotropicFiltering = 16.f,
+	}, "red_crate.mtrl");
+
 	CSpan<u8> cubeGeomData[] = { tk::asBytesSpan(cubeInds), tk::asBytesSpan(cubeVerts_positions), tk::asBytesSpan(cubeVerts_normals), tk::asBytesSpan(cubeVerts_colors) };
 	const tg::CreateGeomInfo cubeGeomInfo = {
 		.positions = tk::asBytesSpan(cubeVerts_positions),
@@ -853,7 +862,8 @@ int main(int argc, char** argv)
 	});
 	auto crateImg = tg::getOrLoadImage("crate.png", true);
 	auto crateImgView = tg::makeImageView({ .image = crateImg });
-	auto crateMaterial = pbrMgr.createMaterial({ .albedoImageView = crateImgView, .anisotropicFiltering = 16.f, });
+	//auto crateMaterial = pbrMgr.createMaterial({ .albedoImageView = crateImgView, .anisotropicFiltering = 16.f, });
+	auto crateMaterial = tg::material_getOrLoadFromFile("red_crate.mtrl");
 	auto crateMesh = tg::makeMesh({ .geom = crateGeom, .material = crateMaterial });
 	const glm::mat4 crateInstanceMatrices[] = {
 		glm::translate(glm::vec3(0, 0, -2)),

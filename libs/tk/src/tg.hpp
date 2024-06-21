@@ -256,13 +256,15 @@ enum class MaterialType : u8
 };
 struct MaterialId : IdU32
 {
-    MaterialType type; // TODO: we could pack everything in 32 bits: 8 for the managerId, 24 for the materialId
-
-    MaterialId() : IdU32(), type{MaterialType::INVALID} {}
-    MaterialId(MaterialType type, u32 id) : type(type), IdU32{ id } {}
+    MaterialId() : IdU32() {}
+    MaterialId(u32 combined_type_id) : IdU32{ combined_type_id } {}
+    MaterialId(MaterialType type, u32 id) : IdU32{ (u32(type) << 24) | id } { }
     VkPipeline getPipeline(GeomId geomId)const;
     VkPipelineLayout getPipelineLayout()const;
     VkDescriptorSet getDescSet()const;
+    u32 getTypeU32()const { return id >> u32(24); }
+    MaterialType getType()const { return MaterialType(getTypeU32()); }
+    void setType(MaterialType type) { id = (u32(type) << 24) | id; }
     //vk::Buffer getBuffer(u32 binding);
     //vk::Image getImage(u32 binding);
 };
@@ -283,10 +285,15 @@ struct MaterialManager {
     VkPipelineLayout(*getPipelineLayout)(void*, MaterialId);
     VkDescriptorSet(*getDescriptorSet)(void*, MaterialId);
     //AttribLocations(*getAttibLocations)(void*, MaterialId);
+    MaterialRC (*deserialize)(void*, CSpan<u8> data);
     
+    MaterialType type() const { return *(MaterialType*)managerPtr; }
     MaterialType& type() { return *(MaterialType*)managerPtr; }
 };
 u32 registerMaterialManager(const MaterialManager& backbacks);
+
+MaterialRC material_createFromMemFile(CSpan<u8> data);
+MaterialRC material_getOrLoadFromFile(ZStrView path);
 
 // PBR MATERIAL
 struct Texture {
@@ -303,10 +310,24 @@ struct PbrMaterialInfo {
     float metallic = 0.f;
     float roughness = 1.f;
     ImageViewRC albedoImageView = ImageViewRC(ImageViewId{});
-    ImageViewRC normalImageView = ImageViewRC(ImageViewId{});
+    ImageViewRC normalsImageView = ImageViewRC(ImageViewId{});
     ImageViewRC metallicRoughnessImageView = ImageViewRC(ImageViewId{});
     float anisotropicFiltering = 1.f;
     bool doubleSided = false;
+};
+struct PbrMaterialSerializeInfo {
+    glm::vec4 albedo = glm::vec4(1.f);
+    float metallic = 0.f;
+    float roughness = 1.f;
+    std::string_view albedoImage = {};
+    std::string_view normalsImage = {};
+    std::string_view metallicRoughnessImage = {};
+    float anisotropicFiltering = 1.f;
+    // flags
+        bool generateMips_albedo : 1 = true;
+        bool generateMips_normals : 1 = true;
+        bool generateMips_metallicRoughness : 1 = true;
+        bool doubleSided : 1 = false;
 };
 
 struct PbrMaterialId : MaterialId {
@@ -349,6 +370,10 @@ struct PbrMaterialManager {
     VkPipelineLayout getPipelineLayout(MaterialId materialId);
     VkDescriptorSet getDescriptorSet(MaterialId materialId) { return materials_descSet[materialId.id]; }
 
+    static void serialize(const PbrMaterialSerializeInfo& info, u8* buffer, u32& size);
+    static tk::SaveFileResult serializeToFile(const PbrMaterialSerializeInfo& info, ZStrView path);
+    MaterialRC deserialize(CSpan<u8> data);
+
     static PbrMaterialManager* s_getOrCreate(u32 maxExpectedMaterials = 4 << 10);
 
     PbrMaterialManager(u32 maxExpectedMaterials);
@@ -363,6 +388,8 @@ struct WireframeMaterialInfo {
     //float thickness;
 };
 typedef WireframeMaterialInfo WireframeUniforms;
+
+struct WireframeMaterialSerializeInfo : WireframeMaterialInfo {};
 
 struct WireframeMaterialManager {
     const MaterialType type = MaterialType::WIREFRAME;
@@ -385,6 +412,10 @@ struct WireframeMaterialManager {
     VkPipeline getPipeline(MaterialId materialId, GeomId geomId) { return pipeline; }
     VkPipelineLayout getPipelineLayout(MaterialId materialId) { return pipelineLayout; }
     VkDescriptorSet getDescriptorSet(MaterialId materialId) { return materials_descSet[materialId.id]; }
+
+    static void serialize(const WireframeMaterialSerializeInfo& info, u8* buffer, u32& size);
+    static tk::SaveFileResult serializeToFile(const WireframeMaterialSerializeInfo& info, ZStrView path);
+    MaterialRC deserialize(CSpan<u8> data);
 
     static WireframeMaterialManager* s_getOrCreate(u32 maxExpectedMaterials = 4 << 10);
 };
