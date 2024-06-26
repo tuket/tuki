@@ -782,8 +782,9 @@ void incRefCount(MaterialId id)
 {
 	if (id.isValid()) {
 		const auto typeU = id.getTypeU32();
+		const u32 idU = id.getIdU32();
 		const auto& materialManagerFns = RU.materialManagers[typeU];
-		u32& rc = RU.materials_refCount[typeU][id.id];
+		u32& rc = RU.materials_refCount[typeU][idU];
 		rc++;
 	}
 }
@@ -791,8 +792,9 @@ void decRefCount(MaterialId id)
 {
 	if (id.isValid()) {
 		const auto& typeU = u32(id.getType());
+		const u32 idU = id.getIdU32();
 		const auto& materialManagerFns = RU.materialManagers[typeU];
-		u32& rc = RU.materials_refCount[typeU][id.id];
+		u32& rc = RU.materials_refCount[typeU][idU];
 		rc--;
 		if (rc == 0)
 			materialManagerFns.destroyMaterial(materialManagerFns.managerPtr, id);
@@ -1505,9 +1507,10 @@ WireframeMaterialRC WireframeMaterialManager::createMaterial(const WireframeMate
 }
 void WireframeMaterialManager::destroyMaterial(MaterialId id)
 {
-	materials_info[id.id] = {};
-	releaseDescSet(descPool, materials_descSet[id.id]);
-	releaseMaterialEntry(*this, id.id);
+	const u32 idU = id.getIdU32();
+	materials_info[idU] = {};
+	releaseDescSet(descPool, materials_descSet[idU]);
+	releaseMaterialEntry(*this, idU);
 }
 
 void WireframeMaterialManager::serialize(const WireframeMaterialSerializeInfo& info, u8* buffer, u32& size)

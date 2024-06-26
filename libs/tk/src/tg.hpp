@@ -264,6 +264,7 @@ struct MaterialId : IdU32
     VkDescriptorSet getDescSet()const;
     u32 getTypeU32()const { return id >> u32(24); }
     MaterialType getType()const { return MaterialType(getTypeU32()); }
+    u32 getIdU32()const { return id & u32(0x00FF'FFFF); }
     void setType(MaterialType type) { id = (u32(type) << 24) | id; }
     //vk::Buffer getBuffer(u32 binding);
     //vk::Image getImage(u32 binding);
@@ -411,7 +412,7 @@ struct WireframeMaterialManager {
 
     VkPipeline getPipeline(MaterialId materialId, GeomId geomId) { return pipeline; }
     VkPipelineLayout getPipelineLayout(MaterialId materialId) { return pipelineLayout; }
-    VkDescriptorSet getDescriptorSet(MaterialId materialId) { return materials_descSet[materialId.id]; }
+    VkDescriptorSet getDescriptorSet(MaterialId materialId) { return materials_descSet[materialId.getIdU32()]; }
 
     static void serialize(const WireframeMaterialSerializeInfo& info, u8* buffer, u32& size);
     static tk::SaveFileResult serializeToFile(const WireframeMaterialSerializeInfo& info, ZStrView path);
