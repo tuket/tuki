@@ -172,43 +172,15 @@ SaveFileResult saveBinaryFile(CSpan<u8> data, ZStrView path)
 	return bytesWritten == data.size() ? SaveFileResult::ok : SaveFileResult::cant_write;
 }
 
+// -- hash --
 static std::array<u64, 4> k_hashingSecret = []() {
 	std::array<u64, 4> sec;
 	make_secret(42382348, sec.data());
 	return sec;
 }();
 
-static u64 hash(std::string_view s) {
+u64 hash(std::string_view s) {
 	return wyhash(s.data(), s.size(), 524354325, k_hashingSecret.data());
-}
-
-// -- PathBag --
-u32 PathBag::getEntry(std::string_view path)const
-{
-	const u64 h = hash(path);
-	if (auto it = hashToEntry.find(h); it == hashToEntry.end())
-		return u32(-1);
-	else {
-		assert(path == paths[it->second]);
-		return it->second;
-	}
-}
-void PathBag::addPath(std::string_view path, u32 entry)
-{
-	assert(!path.empty());
-	assert(getEntry(path) == u32(-1));
-	const size_t newSize = glm::max<size_t>(paths.size(), entry + 1);
-	paths.resize(newSize);
-	paths[entry] = path;
-	const u64 h = hash(path);
-	hashToEntry[h] = entry;
-}
-void PathBag::deleteEntry(u32 entry)
-{
-	assert(!paths[entry].empty());
-	const u64 h = hash(paths[entry]);
-	paths[entry] = {};
-	hashToEntry.erase(h);
 }
 
 // StackTmpAllocator

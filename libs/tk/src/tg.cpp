@@ -123,12 +123,12 @@ struct RenderUniverse
 	std::vector<u32> geoms_refCount;
 	std::vector<vk::Buffer> geoms_buffer;
 	u32 geoms_nextFreeEntry = u32(-1);
-	PathBag geoms_pathBag;
+	StringIds<u32> geoms_pathBag;
 
 	// materials
 	MaterialManager materialManagers[u32(MaterialType::COUNT)];
-	std::vector<std::vector<u32>> materials_refCount;
-	PathBag materials_pathBag;
+	std::vector<u32> materials_refCount[u32(MaterialType::COUNT)];
+	StringIds<u32> materials_pathBag;
 
 	// meshes
 	std::vector<MeshInfo> meshes_info;
@@ -805,7 +805,6 @@ u32 registerMaterialManager(const MaterialManager& mgr)
 {
 	const u32 mgrId = u32(mgr.type());
 	RU.materialManagers[mgrId] = mgr;
-	RU.materials_refCount.emplace_back();
 	return mgrId;
 }
 
@@ -825,6 +824,12 @@ u32 registerMaterialManagerT(MgrT* mgr)
 		},
 		.getDescriptorSet = [](void* self, MaterialId materialId) {
 			return ((MgrT*)self)->getDescriptorSet(materialId);
+		},
+		.createEdtitableMaterial = [](void* self) {
+			return ((MgrT*)self)->createEditableMaterial();
+		},
+		.destroyEditableMaterial = [](void* self, MaterialDataAccessor& a) {
+			return ((MgrT*)self)->destroyEditableMaterial(a);
 		},
 		.deserialize = [](void* self, CSpan<u8> data) {
 			return ((MgrT*)self)->deserialize(data);
@@ -863,6 +868,18 @@ MaterialRC material_getOrLoadFromFile(ZStrView path)
 	RU.materials_pathBag.addPath(path, materialId.id.id);
 
 	return materialId;
+}
+
+MaterialDataAccessor createEditableMaterial(MaterialType type)
+{
+	auto mgr = RU.materialManagers[u32(type)];
+	return mgr.createEditableMaterial(mgr.managerPtr);
+}
+
+void destroyEditableMaterial(MaterialDataAccessor& accessor)
+{
+	auto mgr = RU.materialManagers[u32(accessor.materialType)];
+	mgr.destroyEditableMaterial(mgr.managerPtr, accessor);
 }
 
 // --- PBR MATERIAL ---
@@ -1109,7 +1126,7 @@ VkPipeline PbrMaterialManager::getCreatePipeline(bool hasAlbedoTexture, bool has
 	return p;
 }
 
-PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialInfo& params)
+PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialCreateInfo& params)
 {
 	const bool hasAlbedoTexture = params.albedoImageView.id.isValid();
 	const bool hasNormalTexture = params.normalsImageView.id.isValid();
@@ -1205,6 +1222,20 @@ enum class PbrFileFlags {
 	generateMips_metallicRoughness,
 };
 
+static u32 packPbrFlagsU32(PbrFlagSet fs)
+{
+	u32 flags = 0;
+	auto considerFlag = [&flags](PbrFileFlags flag, bool enable) {
+		if (enable)
+			flags |= u32(1) << u32(flag);
+		};
+	considerFlag(PbrFileFlags::doubleSided, fs.doubleSided);
+	considerFlag(PbrFileFlags::generateMips_albedo, fs.generateMips_albedo);
+	considerFlag(PbrFileFlags::generateMips_normals, fs.generateMips_normals);
+	considerFlag(PbrFileFlags::generateMips_metallicRoughness, fs.generateMips_metallicRoughness);
+	return flags;
+}
+
 void PbrMaterialManager::serialize(const PbrMaterialSerializeInfo& info, u8* buffer, u32& size)
 {
 	const u32 capacity = size;
@@ -1233,15 +1264,7 @@ void PbrMaterialManager::serialize(const PbrMaterialSerializeInfo& info, u8* buf
 			write(c);
 	};
 
-	u32 flags = 0;
-	auto considerFlag = [&flags](PbrFileFlags flag, bool enable) {
-		if (enable)
-			flags |= u32(1) << u32(flag);
-	};
-	considerFlag(PbrFileFlags::doubleSided, info.doubleSided);
-	considerFlag(PbrFileFlags::generateMips_albedo, info.generateMips_albedo);
-	considerFlag(PbrFileFlags::generateMips_normals, info.generateMips_normals);
-	considerFlag(PbrFileFlags::generateMips_metallicRoughness, info.generateMips_metallicRoughness);
+	const u32 flags = packPbrFlagsU32(info.flags);
 
 	write(MaterialType::PBR);
 	write(info.albedo);
@@ -1264,9 +1287,89 @@ tk::SaveFileResult PbrMaterialManager::serializeToFile(const PbrMaterialSerializ
 	return tk::saveBinaryFile({ buffer_alloc.ptr, size }, path);
 }
 
+struct PbrEditableData {
+	MaterialDataAccessor::VTable vtable;
+	glm::vec4 albedo;
+	float metallic = 0;
+	float roughness = 1;
+	float anisotropicFiltering = 1;
+	PbrFlagSet flags;
+	std::string albedoImage;
+	std::string normalsImage;
+	std::string metallicRoughnessImage;
+};
+static constexpr u32 k_pbrNumFields = 11;
+static ConstStr k_pbrFieldNames[] = {
+	"albedo", "metallic", "roughness",
+	"anisotropic filtering",
+	"albedo generate mipmaps", "normals generate mipmaps", "metallic roughness nerate mipmaps", "double sided",
+	"albedo image", "normals image", "metallic roughness image"
+};
+static const MaterialFieldType k_pbrFieldTypes[] = {
+	MaterialFieldType::f32_4, MaterialFieldType::f32, MaterialFieldType::f32,
+	MaterialFieldType::f32,
+	MaterialFieldType::b8, MaterialFieldType::b8, MaterialFieldType::b8, MaterialFieldType::b8,
+	MaterialFieldType::image, MaterialFieldType::image, MaterialFieldType::image
+};
+static_assert(k_pbrNumFields == std::size(k_pbrFieldNames) && k_pbrNumFields == std::size(k_pbrFieldTypes));
+
+MaterialDataAccessor PbrMaterialManager::createEditableMaterial()
+{
+	constexpr u32 numFields = 11;
+
+	#define FIELD_CASE(case_ind, fieldName) case case_ind: memcpy(fieldData.data(), data + offsetof(PbrEditableData, fieldName), sizeof(PbrEditableData::fieldName)); break
+	#define FIELD_CASE_BOOL_FLAG(case_ind, flagName) case case_ind: fieldData[0] = reinterpret_cast<PbrFlagSet*>(data + offsetof(PbrEditableData, flags))->flagName; break
+	#define FIELD_CASE_STRING(case_ind, fieldName) case case_ind: *(ZStrView*)fieldData.data() = reinterpret_cast<PbrEditableData*>(data)->fieldName; break
+
+	const MaterialDataAccessor::VTable vtable {
+		.getFieldName = [](u32 fieldInd) -> std::string_view {
+			assert(fieldInd < k_pbrNumFields);
+			return k_pbrFieldNames[fieldInd];
+		},
+		.getFieldType = [](u32 fieldInd) {
+			assert(fieldInd < k_pbrNumFields);
+			return k_pbrFieldTypes[fieldInd];
+		},
+		.getFieldData = [](void* dataPtr, std::span<u8> fieldData, u32 fieldInd, MaterialFieldType fieldType) {
+			u8* data = (u8*)dataPtr;
+			switch (fieldInd) {
+				FIELD_CASE(0, albedo);
+				FIELD_CASE(1, metallic);
+				FIELD_CASE(2, roughness);
+				FIELD_CASE(3, anisotropicFiltering);
+				FIELD_CASE_BOOL_FLAG(4, generateMips_albedo);
+				FIELD_CASE_BOOL_FLAG(5, generateMips_normals);
+				FIELD_CASE_BOOL_FLAG(6, generateMips_metallicRoughness);
+				FIELD_CASE_BOOL_FLAG(7, doubleSided);
+				FIELD_CASE_STRING(8, albedoImage);
+				FIELD_CASE_STRING(9, normalsImage);
+				FIELD_CASE_STRING(10, metallicRoughnessImage);
+			}
+		},
+		.setFieldData = [](void* dataPtr, CSpan<u8> fieldData, u32 fieldInd, MaterialFieldType fieldType) {
+			u8* data = (u8*)dataPtr;
+		}
+	};
+
+	#undef FIELD_CASE
+	#undef FIELD_CASE_BOOL_FLAG
+	#undef FIELD_CASE_STRING
+
+	MaterialDataAccessor {
+		.materialType = type,
+		.numFields = k_pbrNumFields,
+		._materialData = new PbrEditableData { .vtable = vtable, },
+	};
+}
+
+void PbrMaterialManager::destroyEditableMaterial(MaterialDataAccessor& ma)
+{
+	delete reinterpret_cast<PbrEditableData*>(ma._materialData);
+}
+
 MaterialRC PbrMaterialManager::deserialize(CSpan<u8> data)
 {
-	PbrMaterialInfo materialInfo;
+	PbrMaterialCreateInfo materialInfo;
 	u32 offset = 0;
 	auto read = [&]<typename T>(T& x) {
 		x = *(T*)(data.data() + offset);

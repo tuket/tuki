@@ -136,6 +136,7 @@ auto make_refs_tuple(Ts&... v) { return std::make_tuple(std::ref(v)...); }
 template <typename... Ts>
 auto make_crefs_tuple(Ts&... v) { return std::make_tuple(std::cref(v)...); }
 
+u64 hash(std::string_view s);
 struct DumbHash { u64 operator()(u64 x)const { return x; } };
 
 bool loadTextFile(std::string& str, CStr path);
@@ -160,9 +161,9 @@ struct LoadedBinaryFile {
  };
  SaveFileResult saveBinaryFile(CSpan<u8> data, ZStrView path);
 
- // This is basically a dictionary of string -> u32
+ // This is basically a dictionary of string -> Int
  // It's used for caching loaded files
- // Why not just use std::unordered_map<std::string, u32>?
+ // Why not just use std::unordered_map<std::string, Int>?
  // 1) Performance:
  //     - We don't compare strings, just the hashes
  //     - Use a faster hash function provided by the wyhash library
@@ -170,14 +171,39 @@ struct LoadedBinaryFile {
  //     - Querying for a path would imply having to create a new std::string if we don't have one, whch is expensive since it requires allating memory
  // 2) Bidirectionality:
  //     - We can easy get the path from the entry, just by looking up the "paths" array
-struct PathBag
+ template <typename Int>
+struct StringIds
 {
     std::vector<std::string> paths;
-    std::unordered_map<u64, u32, DumbHash> hashToEntry;
+    std::unordered_map<u64, Int, DumbHash> hashToEntry;
 
-    u32 getEntry(std::string_view path)const;
-    void addPath(std::string_view path, u32 entry);
-    void deleteEntry(u32 entry);
+    Int getEntry(std::string_view path)const
+    {
+        const u64 h = hash(path);
+        if (auto it = hashToEntry.find(h); it == hashToEntry.end())
+            return Int(-1);
+        else {
+            assert(path == paths[it->second]);
+            return it->second;
+        }
+    }
+    void addPath(std::string_view path, Int entry)
+    {
+        assert(!path.empty());
+        assert(getEntry(path) == u32(-1));
+        const size_t newSize = glm::max<size_t>(paths.size(), entry + 1);
+        paths.resize(newSize);
+        paths[entry] = path;
+        const u64 h = tk::hash(path);
+        hashToEntry[h] = entry;
+    }
+    void deleteEntry(Int entry)
+    {
+        assert(!paths[entry].empty());
+        const u64 h = tk::hash(paths[entry]);
+        paths[entry] = {};
+        hashToEntry.erase(h);
+    }
 };
 
 template <typename Int, typename FirstVector, typename... Vectors>

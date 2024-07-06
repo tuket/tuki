@@ -254,6 +254,7 @@ enum class MaterialType : u8
     COUNT,
     INVALID = 255,
 };
+
 struct MaterialId : IdU32
 {
     MaterialId() : IdU32() {}
@@ -279,14 +280,79 @@ typedef RefCounted<MaterialId> MaterialRC;
         T##RC(MaterialType type, u32 id = u32(-1)) : MaterialRC(MaterialId(type, id)) {} \
     }
 
+enum MaterialFieldType
+{
+    b8, // boolean
+    f32, f32_2, f32_3, f32_4,
+    image,
+};
+
+template <MaterialFieldType> struct MaterialFieldTypeT;
+template<> struct MaterialFieldTypeT<MaterialFieldType::b8> { using type = bool; };
+template<> struct MaterialFieldTypeT<MaterialFieldType::f32> { using type = float; };
+template<> struct MaterialFieldTypeT<MaterialFieldType::f32_2> { using type = glm::vec2; };
+template<> struct MaterialFieldTypeT<MaterialFieldType::f32_3> { using type = glm::vec3; };
+template<> struct MaterialFieldTypeT<MaterialFieldType::f32_4> { using type = glm::vec4; };
+template<> struct MaterialFieldTypeT<MaterialFieldType::image> { using type = ZStrView; };
+
+//template<typename T> struct MaterialFieldV;
+//template<> struct MaterialFieldV<bool> { static constexpr MaterialFieldType val = MaterialFieldType::b8; };
+//template<> struct MaterialFieldV<float> { static constexpr MaterialFieldType val = MaterialFieldType::f32; };
+//template<> struct MaterialFieldV<glm::vec2> { static constexpr MaterialFieldType val = MaterialFieldType::f32_2; };
+//template<> struct MaterialFieldV<glm::vec3> { static constexpr MaterialFieldType val = MaterialFieldType::f32_3; };
+//template<> struct MaterialFieldV<glm::vec4> { static constexpr MaterialFieldType val = MaterialFieldType::f32_4; };
+//template<> struct MaterialFieldV<ZStrView> { static constexpr MaterialFieldType val = MaterialFieldType::texture; };
+
+/*
+Allows accessing the properties of the data field of a material.
+The idea is to be able to edit the material without knowledge of the underlying type.
+This is useful for: 1) (de)serializing, 2) material editor UI
+*/
+struct MaterialDataAccessor
+{
+    struct VTable {
+        std::string_view(*getFieldName)(u32 fieldInd) = nullptr;
+        MaterialFieldType(*getFieldType)(u32 fieldInd) = nullptr;
+        void (*getFieldData)(void* materialData, std::span<u8> fieldData, u32 fieldInd, MaterialFieldType fieldType) = nullptr;
+        void (*setFieldData)(void* materialData, CSpan<u8> fieldData, u32 fieldInd, MaterialFieldType fieldType) = nullptr;
+    };
+    const MaterialType materialType;
+    const u32 numFields;
+    void* _materialData;
+
+    VTable& vtable() { return *(VTable*)_materialData; }
+    const VTable& vtable()const { return *(VTable*)_materialData; }
+    auto getFieldName(u32 fieldInd)const { return vtable().getFieldName(fieldInd); }
+    auto getFieldType(u32 fieldInd)const { return vtable().getFieldType(fieldInd); }
+
+    template <MaterialFieldType FT>
+    typename MaterialFieldTypeT<FT>::type getField(u32 fieldInd)const
+    {
+        u8 buffer[256];
+        vtable().getFieldData(_materialData, buffer, fieldInd, FT);
+        using T = MaterialFieldTypeT<FT>::type;
+        return *(T*)buffer;
+    }
+
+    template <MaterialFieldType FT>
+    void setField(u32 fieldInd, typename const MaterialFieldTypeT<FT>::type& val)
+    {
+        CSpan valData(&val, sizeof(MaterialFieldTypeT<FT>::type));
+        assert(FT == getFieldType(fieldInd));
+        vtable().setFieldData(_materialData, valData, fieldInd, FT);
+    }
+};
+
 struct MaterialManager {
-    void* managerPtr;
-    void(*destroyMaterial)(void*, MaterialId);
-    VkPipeline(*getPipeline)(void*, MaterialId, GeomId);
-    VkPipelineLayout(*getPipelineLayout)(void*, MaterialId);
-    VkDescriptorSet(*getDescriptorSet)(void*, MaterialId);
+    void* managerPtr = nullptr;
+    void(*destroyMaterial)(void*, MaterialId) = nullptr;
+    VkPipeline(*getPipeline)(void*, MaterialId, GeomId) = nullptr;
+    VkPipelineLayout(*getPipelineLayout)(void*, MaterialId) = nullptr;
+    VkDescriptorSet(*getDescriptorSet)(void*, MaterialId) = nullptr;
     //AttribLocations(*getAttibLocations)(void*, MaterialId);
-    MaterialRC (*deserialize)(void*, CSpan<u8> data);
+    MaterialDataAccessor (*createEditableMaterial)(void*) = nullptr;
+    void (*destroyEditableMaterial)(void*, MaterialDataAccessor&) = nullptr;
+    MaterialRC (*deserialize)(void*, CSpan<u8> data) = nullptr;
     
     MaterialType type() const { return *(MaterialType*)managerPtr; }
     MaterialType& type() { return *(MaterialType*)managerPtr; }
@@ -295,6 +361,9 @@ u32 registerMaterialManager(const MaterialManager& backbacks);
 
 MaterialRC material_createFromMemFile(CSpan<u8> data);
 MaterialRC material_getOrLoadFromFile(ZStrView path);
+
+MaterialDataAccessor createEditableMaterial(MaterialType type);
+void destroyEditableMaterial(MaterialDataAccessor& accessor);
 
 // PBR MATERIAL
 struct Texture {
@@ -306,7 +375,7 @@ struct PbrUniforms {
     float metallic = 0.f;
     float roughness = 1.f;
 };
-struct PbrMaterialInfo {
+struct PbrMaterialCreateInfo {
     glm::vec4 albedo = glm::vec4(1.f);
     float metallic = 0.f;
     float roughness = 1.f;
@@ -316,6 +385,12 @@ struct PbrMaterialInfo {
     float anisotropicFiltering = 1.f;
     bool doubleSided = false;
 };
+struct PbrFlagSet {
+    bool generateMips_albedo : 1 = true;
+    bool generateMips_normals : 1 = true;
+    bool generateMips_metallicRoughness : 1 = true;
+    bool doubleSided : 1 = false;
+};
 struct PbrMaterialSerializeInfo {
     glm::vec4 albedo = glm::vec4(1.f);
     float metallic = 0.f;
@@ -324,11 +399,7 @@ struct PbrMaterialSerializeInfo {
     std::string_view normalsImage = {};
     std::string_view metallicRoughnessImage = {};
     float anisotropicFiltering = 1.f;
-    // flags
-        bool generateMips_albedo : 1 = true;
-        bool generateMips_normals : 1 = true;
-        bool generateMips_metallicRoughness : 1 = true;
-        bool doubleSided : 1 = false;
+    PbrFlagSet flags;
 };
 
 struct PbrMaterialId : MaterialId {
@@ -353,7 +424,7 @@ struct PbrMaterialManager {
         [/*hasAlbedoTexture*/ 2][/*hasNormalTexture*/ 2][/*hasMetallicRoughnessTexture*/ 2]
         [/*hasVertexNormalsOrTangents*/ 3][/*hasTexCoords*/2][/*hasVertexColors*/ 2][/*doubleSided*/ 2] = {};
 
-    std::vector<PbrMaterialInfo> materials_info;
+    std::vector<PbrMaterialCreateInfo> materials_info;
     std::vector<VkDescriptorSet> materials_descSet;
     //std::vector<u32> materials_customSamplers; // shall be not null when we are not using a sampler from "defaultSamplers". When using custom samplers, we would need to delete the sampler when the material is destroyed
     vk::Buffer uniformBuffer; // a large uniform buffer contaning the data for all materials
@@ -364,7 +435,7 @@ struct PbrMaterialManager {
     VkPipeline getCreatePipeline(bool hasAlbedoTexture, bool hasNormalTexture, bool hasMetallicRoughnessTexture,
         HasVertexNormalsOrTangents hasVertexNormalsOrTangents, bool hasTexCoords, bool hasVertexColors, bool doubleSided);
 
-    PbrMaterialRC createMaterial(const PbrMaterialInfo& params);
+    PbrMaterialRC createMaterial(const PbrMaterialCreateInfo& params);
     void destroyMaterial(MaterialId id);
 
     VkPipeline getPipeline(MaterialId materialId, GeomId geomId);
@@ -373,6 +444,8 @@ struct PbrMaterialManager {
 
     static void serialize(const PbrMaterialSerializeInfo& info, u8* buffer, u32& size);
     static tk::SaveFileResult serializeToFile(const PbrMaterialSerializeInfo& info, ZStrView path);
+    MaterialDataAccessor createEditableMaterial();
+    void destroyEditableMaterial(MaterialDataAccessor& ma);
     MaterialRC deserialize(CSpan<u8> data);
 
     static PbrMaterialManager* s_getOrCreate(u32 maxExpectedMaterials = 4 << 10);
