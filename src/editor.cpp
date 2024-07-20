@@ -12,6 +12,7 @@
 #include <imgui_impl_vulkan.h>
 #include <physfs.h>
 #include <Tracy.hpp>
+#include <tinyfiledialogs.h>
 
 namespace tvk = tk::vk;
 using tk::CSpan;
@@ -551,9 +552,120 @@ struct FilePreviews {
 		}
 	};
 
+	struct MaterialPreview
+	{
+		std::string path;
+		tg::MaterialDataAccessor editableMaterial;
+
+		MaterialPreview(tk::ZStrView path)
+			: path(path)
+			, editableMaterial(tg::createEditableMaterial(path))
+		{
+
+		}
+
+		bool genericGuiDraw()
+		{
+			typedef tg::MaterialFieldType FT;
+			bool modified = false;
+			for (u32 fieldI = 0; fieldI < editableMaterial.numFields; fieldI++)
+			{
+				auto fieldName = editableMaterial.getFieldName(fieldI);
+				auto fiedlNameBegin = fieldName.data();
+				auto fieldNameEnd = fieldName.data() + fieldName.length();
+				auto fieldType = editableMaterial.getFieldType(fieldI);
+
+				ImGui::PushID(fiedlNameBegin, fieldNameEnd);
+				switch (fieldType)
+				{
+				case FT::b8:
+				{
+					bool b = editableMaterial.getField<FT::b8>(fieldI);
+					if (ImGui::Checkbox("", &b)) {
+						editableMaterial.setField<FT::b8>(fieldI, b);
+						modified = true;
+					}
+				} break;
+
+				case FT::f32:
+				{
+					float val = editableMaterial.getField<FT::f32>(fieldI);
+					if (ImGui::DragFloat("", &val, 0.001f)) {
+						editableMaterial.setField<FT::f32>(fieldI, val);
+						modified = true;
+					}
+				} break;
+
+				case FT::f32_2:
+				{
+					glm::vec2 val = editableMaterial.getField<FT::f32_2>(fieldI);
+					if (ImGui::DragFloat2("", &val[0], 0.001f)) {
+						editableMaterial.setField<FT::f32_2>(fieldI, val);
+						modified = true;
+					}
+				} break;
+				case FT::f32_3:
+				{
+					glm::vec3 val = editableMaterial.getField<FT::f32_3>(fieldI);
+					if (ImGui::DragFloat3("", &val[0], 0.001f)) {
+						editableMaterial.setField<FT::f32_3>(fieldI, val);
+						modified = true;
+					}
+				} break;
+				case FT::f32_4:
+				{
+					glm::vec4 val = editableMaterial.getField<FT::f32_4>(fieldI);
+					if (ImGui::DragFloat4("", &val[0], 0.001f)) {
+						editableMaterial.setField<FT::f32_4>(fieldI, val);
+						modified = true;
+					}
+				} break;
+				case FT::image:
+				{
+					std::string_view val = editableMaterial.getField<FT::image>(fieldI);
+					const int bufferSize = 512;
+					auto bufferAlloc = tk::getStackTmpAllocator().alloc<char>(bufferSize);
+					snprintf(bufferAlloc.ptr, bufferSize, "%.*s", int(val.length()), val.data());
+					if (ImGui::SmallButton(bufferAlloc.ptr)) {
+						CStr filterPatterns[] = { "*.png", "*.jpg" };
+						char* path = tinyfd_openFileDialog("Select Image", "./", std::size(filterPatterns), filterPatterns, "image files", 0);
+						if (path)
+							editableMaterial.setField<FT::image>(fieldI, tk::ZStrView(path));
+					}
+				} break;
+
+				default:
+					ImGui::Text("?");
+					break;
+				}
+				ImGui::PopID();
+
+				ImGui::SameLine();
+				ImGui::TextUnformatted(fieldName.data(), fieldName.data() + fieldName.length());
+			}
+			return modified;
+		}
+
+		bool draw()
+		{
+			bool open = true;
+			ImGui::Begin(path.c_str(), &open);
+
+			/*if (editableMaterial.customGuiDraw)
+				editableMaterial.customGuiDraw();
+			else*/
+				genericGuiDraw();
+
+			ImGui::End();
+
+			return !open;
+		}
+	};
+
 	std::vector<TextPreview> textPreviews;
 	std::vector<ImagePreview> imagePreviews;
 	std::vector<GeomPreview> geomPreviews;
+	std::vector<MaterialPreview> materialPreviews;
 
 	tg::MaterialRC solidMaterialRC = tg::MaterialRC{};
 	tg::MaterialRC& solidMaterial()
@@ -588,6 +700,9 @@ struct FilePreviews {
 		}
 		else if (endsWith(path, ".geom")) {
 			geomPreviews.emplace_back(path, solidMaterial(), wireframeMaterial());
+		}
+		else if (endsWith(path, ".mtrl")) {
+			materialPreviews.emplace_back(path);
 		}
 		else {
 			printf("this file can't be previewed\n");
@@ -624,6 +739,7 @@ struct FilePreviews {
 		drawPreviews(textPreviews);
 		drawPreviews(imagePreviews);
 		drawPreviews(geomPreviews);
+		drawPreviews(materialPreviews);
 	}
 
 	void getRenderTargetsViewports(std::vector<tg::RenderTargetWorldViewports>& rtViewports)

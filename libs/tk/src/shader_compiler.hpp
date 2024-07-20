@@ -24,7 +24,7 @@ struct PreprocDefine { StrView name, value = ""; };
 
 struct ShaderCompiler
 {
-	typedef std::unordered_map<std::string, std::string> CacheMap;
+	typedef TStrMap<std::string> CacheMap;
 
 	shaderc_compiler_t compiler = nullptr;
 	std::string rootShadersPath = "";

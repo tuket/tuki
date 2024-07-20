@@ -12,6 +12,7 @@ add_subdirectory(libs/cgltf)
 add_subdirectory(libs/wyhash)
 add_subdirectory(libs/imgui)
 add_subdirectory(libs/physfs)
+add_subdirectory(libs/tinyfiledialogs)
 
 set(SRCS_TOP
 	src/vma.h
@@ -30,4 +31,4 @@ add_library(tk ${SRCS_TOP} ${SRCS})
 source_group("" FILES ${SRCS_TOP})
 source_group("tk" FILES ${SRCS})
 target_include_directories(tk PUBLIC ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(tk PUBLIC tracy Vulkan::Vulkan Vulkan::shaderc_combined glfw glm stb cgltf wyhash imgui physfs-static)
+target_link_libraries(tk PUBLIC tracy Vulkan::Vulkan Vulkan::shaderc_combined glfw glm stb cgltf wyhash imgui physfs-static tinyfiledialogs)

@@ -39,7 +39,7 @@ struct ZStrView : public std::string_view {
     ZStrView(const std::string& s) : std::string_view(s) {}
 
     operator const char* ()const { return data(); }
-    operator ::std::string()const { return std::string(begin(), end()); }
+    //operator ::std::string()const { return std::string(begin(), end()); }
 
     const char* c_str()const { return data(); }
 };
@@ -138,6 +138,17 @@ auto make_crefs_tuple(Ts&... v) { return std::make_tuple(std::cref(v)...); }
 
 u64 hash(std::string_view s);
 struct DumbHash { u64 operator()(u64 x)const { return x; } };
+
+struct AnyStringHasher { // https://stackoverflow.com/a/71258936/1754322
+    using is_transparent = void;
+    size_t operator()(const char* s)const { return hash(std::string_view(s)); }
+    size_t operator()(std::string_view s)const { return hash(s); }
+    size_t operator()(ZStrView s)const { return hash(s); }
+    size_t operator()(const std::string& s)const { return hash(s); }
+};
+
+template <typename T>
+using TStrMap = std::unordered_map<std::string, T, AnyStringHasher, std::equal_to<>>;
 
 bool loadTextFile(std::string& str, CStr path);
 

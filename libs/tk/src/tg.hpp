@@ -313,11 +313,11 @@ struct MaterialDataAccessor
     struct VTable {
         std::string_view(*getFieldName)(u32 fieldInd) = nullptr;
         MaterialFieldType(*getFieldType)(u32 fieldInd) = nullptr;
-        void (*getFieldData)(void* materialData, std::span<u8> fieldData, u32 fieldInd, MaterialFieldType fieldType) = nullptr;
+        void (*getFieldData)(const void* materialData, std::span<u8> fieldData, u32 fieldInd, MaterialFieldType fieldType) = nullptr;
         void (*setFieldData)(void* materialData, CSpan<u8> fieldData, u32 fieldInd, MaterialFieldType fieldType) = nullptr;
     };
-    const MaterialType materialType;
-    const u32 numFields;
+    MaterialType materialType;
+    u32 numFields;
     void* _materialData;
 
     VTable& vtable() { return *(VTable*)_materialData; }
@@ -337,7 +337,7 @@ struct MaterialDataAccessor
     template <MaterialFieldType FT>
     void setField(u32 fieldInd, typename const MaterialFieldTypeT<FT>::type& val)
     {
-        CSpan valData(&val, sizeof(MaterialFieldTypeT<FT>::type));
+        CSpan valData((const u8*) &val, sizeof(MaterialFieldTypeT<FT>::type));
         assert(FT == getFieldType(fieldInd));
         vtable().setFieldData(_materialData, valData, fieldInd, FT);
     }
@@ -345,14 +345,24 @@ struct MaterialDataAccessor
 
 struct MaterialManager {
     void* managerPtr = nullptr;
-    void(*destroyMaterial)(void*, MaterialId) = nullptr;
-    VkPipeline(*getPipeline)(void*, MaterialId, GeomId) = nullptr;
-    VkPipelineLayout(*getPipelineLayout)(void*, MaterialId) = nullptr;
-    VkDescriptorSet(*getDescriptorSet)(void*, MaterialId) = nullptr;
+    MaterialRC(*_createMaterial)(void*, CSpan<u8> data) = nullptr;
+    void(*_destroyMaterial)(void*, MaterialId) = nullptr;
+    VkPipeline(*_getPipeline)(void*, MaterialId, GeomId) = nullptr;
+    VkPipelineLayout(*_getPipelineLayout)(void*, MaterialId) = nullptr;
+    VkDescriptorSet(*_getDescriptorSet)(void*, MaterialId) = nullptr;
     //AttribLocations(*getAttibLocations)(void*, MaterialId);
-    MaterialDataAccessor (*createEditableMaterial)(void*) = nullptr;
-    void (*destroyEditableMaterial)(void*, MaterialDataAccessor&) = nullptr;
-    MaterialRC (*deserialize)(void*, CSpan<u8> data) = nullptr;
+    MaterialDataAccessor (*_createEditableMaterial)(void*, CSpan<u8> data) = nullptr;
+    void (*_destroyEditableMaterial)(void*, MaterialDataAccessor&) = nullptr;
+    void (*_serializeEditableMaterial)(void*, const MaterialDataAccessor&, u8* data, u32& size) = nullptr;
+
+    MaterialRC createMaterial(CSpan<u8> data) { return _createMaterial(managerPtr, data); }
+    void destroyMaterial(MaterialId materialId) { _destroyMaterial(managerPtr, materialId); }
+    VkPipeline getPipeline(MaterialId materialId, GeomId geomId) { return _getPipeline(managerPtr, materialId, geomId); }
+    VkPipelineLayout getPipelineLayout(MaterialId materialId) { return _getPipelineLayout(managerPtr, materialId); }
+    VkDescriptorSet getDescriptorSet(MaterialId materialId) { return _getDescriptorSet(managerPtr, materialId); }
+    MaterialDataAccessor createEditableMaterial(CSpan<u8> serializedData = {}) { return _createEditableMaterial(managerPtr, serializedData); }
+    void destroyEditableMaterial(MaterialDataAccessor& editableMaterial) { return _destroyEditableMaterial(managerPtr, editableMaterial); }
+    void serializeEditableMaterial(const MaterialDataAccessor& editableMaterial, u8* data, u32& size) { _serializeEditableMaterial(managerPtr, editableMaterial, data, size); }
     
     MaterialType type() const { return *(MaterialType*)managerPtr; }
     MaterialType& type() { return *(MaterialType*)managerPtr; }
@@ -363,7 +373,12 @@ MaterialRC material_createFromMemFile(CSpan<u8> data);
 MaterialRC material_getOrLoadFromFile(ZStrView path);
 
 MaterialDataAccessor createEditableMaterial(MaterialType type);
+MaterialDataAccessor createEditableMaterial(CSpan<u8> serializedData);
+MaterialDataAccessor createEditableMaterial(ZStrView path);
 void destroyEditableMaterial(MaterialDataAccessor& accessor);
+void serializeEditableMaterial(const MaterialDataAccessor& editableMaterial, u8* data, u32& dataSize);
+MaterialDataAccessor loadEditableMaterial(ZStrView path);
+void saveEditableMaterial(const MaterialDataAccessor& editableMaterial, ZStrView path);
 
 // PBR MATERIAL
 struct Texture {
@@ -436,6 +451,7 @@ struct PbrMaterialManager {
         HasVertexNormalsOrTangents hasVertexNormalsOrTangents, bool hasTexCoords, bool hasVertexColors, bool doubleSided);
 
     PbrMaterialRC createMaterial(const PbrMaterialCreateInfo& params);
+    MaterialRC createMaterial(CSpan<u8> serializedData);
     void destroyMaterial(MaterialId id);
 
     VkPipeline getPipeline(MaterialId materialId, GeomId geomId);
@@ -444,9 +460,10 @@ struct PbrMaterialManager {
 
     static void serialize(const PbrMaterialSerializeInfo& info, u8* buffer, u32& size);
     static tk::SaveFileResult serializeToFile(const PbrMaterialSerializeInfo& info, ZStrView path);
-    MaterialDataAccessor createEditableMaterial();
+
+    MaterialDataAccessor createEditableMaterial(CSpan<u8> serializedData);
     void destroyEditableMaterial(MaterialDataAccessor& ma);
-    MaterialRC deserialize(CSpan<u8> data);
+    static void serializeEditableMaterial(const MaterialDataAccessor& editableMaterial, u8* data, u32& size);
 
     static PbrMaterialManager* s_getOrCreate(u32 maxExpectedMaterials = 4 << 10);
 
@@ -462,8 +479,7 @@ struct WireframeMaterialInfo {
     //float thickness;
 };
 typedef WireframeMaterialInfo WireframeUniforms;
-
-struct WireframeMaterialSerializeInfo : WireframeMaterialInfo {};
+typedef WireframeMaterialInfo WireframeMaterialSerializeInfo;
 
 struct WireframeMaterialManager {
     const MaterialType type = MaterialType::WIREFRAME;
@@ -481,6 +497,7 @@ struct WireframeMaterialManager {
     WireframeMaterialManager(u32 maxExpectedMaterials);
 
     WireframeMaterialRC createMaterial(const WireframeMaterialInfo& params);
+    MaterialRC createMaterial(CSpan<u8> data);
     void destroyMaterial(MaterialId id);
 
     VkPipeline getPipeline(MaterialId materialId, GeomId geomId) { return pipeline; }
@@ -489,7 +506,10 @@ struct WireframeMaterialManager {
 
     static void serialize(const WireframeMaterialSerializeInfo& info, u8* buffer, u32& size);
     static tk::SaveFileResult serializeToFile(const WireframeMaterialSerializeInfo& info, ZStrView path);
-    MaterialRC deserialize(CSpan<u8> data);
+
+    MaterialDataAccessor createEditableMaterial(CSpan<u8> serializedData);
+    void destroyEditableMaterial(MaterialDataAccessor& ma);
+    static void serializeEditableMaterial(const MaterialDataAccessor& editableMaterial, u8* data, u32& size);
 
     static WireframeMaterialManager* s_getOrCreate(u32 maxExpectedMaterials = 4 << 10);
 };

@@ -129,7 +129,7 @@ ShaderCompiler::CacheMap::const_iterator ShaderCompiler::getOrLoadGlsl(ZStrView 
 		std::string src;
 		if (!loadTextFile(src, filePath))
 			return glslSrcsCache.end();
-		auto insertionResult = glslSrcsCache.insert({ filePath, src });
+		auto insertionResult = glslSrcsCache.emplace(filePath, src);
 		return insertionResult.first;
 	}
 	else {
