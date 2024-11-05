@@ -1368,11 +1368,11 @@ void PbrMaterialManager::serialize(const PbrMaterialSerializeInfo& info, u8* buf
 	write(info.albedo);
 	write(info.metallic);
 	write(info.roughness);
-	write(flags);
 	writeStr(info.albedoImage);
 	writeStr(info.normalsImage);
 	writeStr(info.metallicRoughnessImage);
 	write(info.anisotropicFiltering);
+	write(flags);
 }
 
 tk::SaveFileResult PbrMaterialManager::serializeToFile(const PbrMaterialSerializeInfo& info, ZStrView path)
@@ -1470,11 +1470,11 @@ MaterialDataAccessor PbrMaterialManager::createEditableMaterial(CSpan<u8> serial
 	R.read(ED->albedo);
 	R.read(ED->metallic);
 	R.read(ED->roughness);
-	R.read(ED->anisotropicFiltering);
-	R.read(ED->flags);
 	ED->albedoImage = R.readStr();
 	ED->normalsImage = R.readStr();
 	ED->metallicRoughnessImage = R.readStr();
+	R.read(ED->anisotropicFiltering);
+	R.read(ED->flags);
 
 	return MaterialDataAccessor {
 		.materialType = type,

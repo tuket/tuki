@@ -235,7 +235,7 @@ inline GeomRC geom_createFromInfo(const CreateGeomInfo& info) {
     return h;
 };
 
-// keeps track or geoms that have been already loaded, so to avoid loading duplicates
+// keeps track of geoms that have been already loaded, so to avoid loading duplicates
 [[nodiscard]]
 GeomRC geom_getOrLoadFromFile(CStr path, AABB* aabb = nullptr);
 
@@ -280,7 +280,7 @@ typedef RefCounted<MaterialId> MaterialRC;
         T##RC(MaterialType type, u32 id = u32(-1)) : MaterialRC(MaterialId(type, id)) {} \
     }
 
-enum MaterialFieldType
+enum class MaterialFieldType
 {
     b8, // boolean
     f32, f32_2, f32_3, f32_4,
@@ -328,6 +328,7 @@ struct MaterialDataAccessor
     template <MaterialFieldType FT>
     typename MaterialFieldTypeT<FT>::type getField(u32 fieldInd)const
     {
+        assert(FT == getFieldType(fieldInd));
         u8 buffer[256];
         vtable().getFieldData(_materialData, buffer, fieldInd, FT);
         using T = MaterialFieldTypeT<FT>::type;
@@ -337,8 +338,8 @@ struct MaterialDataAccessor
     template <MaterialFieldType FT>
     void setField(u32 fieldInd, typename const MaterialFieldTypeT<FT>::type& val)
     {
-        CSpan valData((const u8*) &val, sizeof(MaterialFieldTypeT<FT>::type));
         assert(FT == getFieldType(fieldInd));
+        CSpan valData((const u8*) &val, sizeof(MaterialFieldTypeT<FT>::type));
         vtable().setFieldData(_materialData, valData, fieldInd, FT);
     }
 };
