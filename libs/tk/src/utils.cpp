@@ -8,6 +8,12 @@
 #include <array>
 #include <physfs.h>
 
+#if defined(_WIN32)
+	#include <direct.h>
+#elif defined(__unix__)
+	#include <unistd.h>
+#endif
+
 namespace tk
 {
 
@@ -123,6 +129,17 @@ glm::mat4 PerspectiveCamera::projMtx_vk(float aspectRatio)const
 	return M;
 }
 
+void getWorkingDir(u32 bufferSize, char* buffer)
+{
+#if defined(_WIN32)
+	_getcwd(buffer, bufferSize);
+#elif defined(__unix__)
+	getcwd(buffer, bufferSize);
+#else
+	#error getWorkingDir not implemented for this platform
+#endif
+}
+
 bool loadTextFile(std::string& str, CStr path)
 {
 	if (0) { // using the C API
@@ -159,6 +176,21 @@ LoadedBinaryFile loadBinaryFile(CStr path)
 		return { 0, nullptr };
 	}
 	return { size_t(fileLen), fileData };
+}
+
+LoadedBinaryFile_tmp loadBinaryFile_tmp(CStr path)
+{
+	auto* file = PHYSFS_openRead(path);
+	if (!file)
+		return {};
+	defer(PHYSFS_close(file););
+	const auto fileLen = PHYSFS_fileLength(file);
+	return {
+		size_t(fileLen),
+		getStackTmpAllocator().alloc<u8>(fileLen, [file](u8* data, auto len) -> bool {
+			return PHYSFS_readBytes(file, data, len) == len;
+		})
+	};
 }
 
 SaveFileResult saveBinaryFile(CSpan<u8> data, ZStrView path)

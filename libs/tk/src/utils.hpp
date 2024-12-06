@@ -44,6 +44,77 @@ struct ZStrView : public std::string_view {
     const char* c_str()const { return data(); }
 };
 
+struct StackTmpAllocator
+{
+    typedef u32 Size;
+    std::unique_ptr<u8[]> data;
+    Size capacity = 0;
+    Size top = -1;
+
+    StackTmpAllocator() {}
+    StackTmpAllocator(Size capacity) : data(new u8[capacity]), capacity(capacity), top(capacity) {}
+
+    template <typename T>
+    struct AutoDelete
+    {
+        StackTmpAllocator* stackAllocator;
+        T* ptr = nullptr;
+
+        AutoDelete() {}
+        AutoDelete(StackTmpAllocator& a, u8* ptr) : stackAllocator(&a), ptr((T*)ptr) {}
+        AutoDelete(const AutoDelete&) = delete;
+
+        ~AutoDelete()
+        {
+            if (!ptr)
+                return;
+
+            auto& A = *stackAllocator;
+            u8* aPtr = (u8*)A.data.get();
+            assert(Size((u8*)ptr - aPtr) == A.top + sizeof(Size));
+            const u32 frameSize = *(Size*)(aPtr + A.top);
+            A.top += frameSize + sizeof(Size);
+        }
+    };
+
+    template <typename T>
+    static bool _allocDefaultInitFn(T* data, Size len) { return true; }
+
+    template <typename T, typename InitFn = decltype(_allocDefaultInitFn<T>)>
+    [[nodiscard]]
+    AutoDelete<T> alloc(Size len, InitFn initFn = _allocDefaultInitFn<T>)
+    {
+        const size_t sizeT = len * sizeof(T);
+        const size_t size2 = sizeT + sizeof(Size);
+        T* ptr = nullptr;
+        if (top == capacity) {
+            if (size2 > capacity) {
+                data = std::make_unique<u8[]>(size2);
+                capacity = size2;
+            }
+        }
+        else {
+            if (top < size2)
+                return {};
+        }
+        top -= size2;
+        *(Size*)(data.get() + top) = sizeT;
+        auto dataStart = data.get() + top + sizeof(Size);
+        if (initFn((T*)dataStart, len))
+            return AutoDelete<T>(*this, dataStart);
+        else {
+            AutoDelete<T> _autoDel(*this, dataStart);
+            return {};
+        }
+    }
+};
+
+template <typename T>
+using StackTmpAllocation = StackTmpAllocator::AutoDelete<T>;
+
+void initStackTmpAllocator(size_t capacity);
+StackTmpAllocator& getStackTmpAllocator();
+
 struct AABB {
     glm::vec3 min = { 0, 0, 0 }, max = { 0, 0, 0 };
 
@@ -150,15 +221,23 @@ struct AnyStringHasher { // https://stackoverflow.com/a/71258936/1754322
 template <typename T>
 using TStrMap = std::unordered_map<std::string, T, AnyStringHasher, std::equal_to<>>;
 
+void getWorkingDir(u32 bufferSize, char* buffer);
+
 bool loadTextFile(std::string& str, CStr path);
 
 struct LoadedBinaryFile {
     size_t size = 0;
     u8* data = nullptr;
 };
- LoadedBinaryFile loadBinaryFile(CStr path);
+LoadedBinaryFile loadBinaryFile(CStr path);
 
- struct SaveFileResult {
+struct LoadedBinaryFile_tmp {
+    size_t size = 0;
+    StackTmpAllocation<u8> alloc;
+};
+LoadedBinaryFile_tmp loadBinaryFile_tmp(CStr path);
+
+struct SaveFileResult {
     enum Code : u8 {
         ok,
         cant_open,
@@ -331,65 +410,6 @@ static void appendBits(size_t& y, Int x, size_t numBits) {
     y = (y << numBits) | (bits & mask);
 }
 
-struct StackTmpAllocator
-{
-    typedef u32 Size;
-    std::unique_ptr<u8[]> data;
-    Size capacity = 0;
-    Size top = -1;
-
-    StackTmpAllocator() {}
-    StackTmpAllocator(Size capacity) : data(new u8[capacity]), capacity(capacity), top(capacity) {}
-
-    template <typename T>
-    struct AutoDelete
-    {
-        StackTmpAllocator* stackAllocator;
-        T* ptr = nullptr;
-
-        AutoDelete() {}
-        AutoDelete(StackTmpAllocator& a, u8* ptr) : stackAllocator(&a), ptr((T*)ptr) {}
-        AutoDelete(const AutoDelete&) = delete;
-
-        ~AutoDelete()
-        {
-            if (!ptr)
-                return;
-
-            auto& A = *stackAllocator;
-            u8* aPtr = (u8*)A.data.get();
-            assert (Size((u8*)ptr - aPtr) == A.top + sizeof(Size));
-            const u32 frameSize = *(Size*)(aPtr + A.top);
-            A.top += frameSize + sizeof(Size);
-        }
-    };
-
-    template <typename T>
-    [[nodiscard]]
-    AutoDelete<T> alloc(Size len)
-    {
-        const size_t sizeT = len * sizeof(T);
-        const size_t size2 = sizeT + sizeof(Size);
-        T* ptr = nullptr;
-        if (top == capacity) {
-            if (size2 > capacity) {
-                data = std::make_unique<u8[]>(size2);
-                capacity = size2;
-            }
-        }
-        else {
-            if (top < size2)
-                return {};
-        }
-        top -= size2;
-        *(Size*)(data.get() + top) = sizeT;
-        return AutoDelete<T>(*this, data.get() + top + sizeof(Size));
-    }
-};
-
-void initStackTmpAllocator(size_t capacity);
-StackTmpAllocator& getStackTmpAllocator();
-
 template <typename Fn, size_t... INDS>
 void _comptime_for(Fn fn, std::index_sequence<INDS...>) {
     (fn.template operator()<INDS>(), ...);
@@ -398,6 +418,61 @@ template <size_t N, typename Fn>
 void comptime_for(Fn fn) {
     _comptime_for<Fn>(fn, std::make_index_sequence<N>{});
 }
+
+template <std::unsigned_integral UInt, std::same_as<bool> ...Bool>
+UInt packBools(Bool... bools) {
+    UInt res = 0;
+    ((res = (res << 1) | UInt(bools ? 1 : 0)), ...);
+    return res;
+}
+
+template<typename T> concept EnumConcept = std::is_enum_v<T>;
+
+template <typename IntT, EnumConcept EnumT>
+struct FlagSet
+{
+    IntT bits = 0;
+
+    constexpr FlagSet() {}
+    constexpr explicit FlagSet(IntT bits) : bits(bits) {}
+    constexpr FlagSet(std::initializer_list<EnumT> enums) {
+        for (EnumT e : enums) {
+            assert(IntT(e) < 8 * sizeof(IntT));
+            bits |= IntT(1) << IntT(e);
+        }
+    }
+
+    FlagSet& operator=(std::initializer_list<EnumT> enums) { bits = FlagSet({ enums }).bits; };
+    
+    FlagSet operator|(FlagSet o) const { return FlagSet(bits | o.bits); }
+    FlagSet operator&(FlagSet o) const { return FlagSet(bits & o.bits); }
+    FlagSet operator^(FlagSet o) const { return FlagSet(bits ^ o.bits); }
+    FlagSet operator~() const { return FlagSet(~bits); }
+    FlagSet operator|(EnumT e) const { return *this | FlagSet{e}; }
+    FlagSet operator&(EnumT e) const { return *this & FlagSet{e}; }
+    FlagSet operator^(EnumT e) const { return *this ^ FlagSet{e}; }
+
+    FlagSet& operator=(FlagSet o) { bits = o.bits; return *this; }
+    FlagSet& operator|=(FlagSet o) { bits |= o.bits; return *this; }
+    FlagSet& operator&=(FlagSet o) { bits &= o.bits; return *this; }
+    FlagSet& operator^=(FlagSet o) { bits ^= o.bits; return *this; }
+
+    FlagSet& operator|=(EnumT e) { bits |= FlagSet({e}).bits; return *this; }
+    FlagSet& operator&=(EnumT e) { bits &= FlagSet({e}).bits; return *this; }
+    FlagSet& operator^=(EnumT e) { bits ^= FlagSet({e}).bits; return *this; }
+
+    operator bool()const { return bits != IntT(0); };
+    bool has(EnumT e)const { return *this & FlagSet{ e }; }
+    FlagSet& set(EnumT e, bool b = true) {
+        if (b)
+            bits |= IntT(1) << IntT(e);
+        else
+            bits &= ~(IntT(1) << IntT(e));
+        return *this;
+    }
+
+    auto operator<=>(FlagSet o)const { return bits <=> o.bits; }
+};
 
 template <typename F>
 struct _Defer {

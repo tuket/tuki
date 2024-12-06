@@ -425,7 +425,11 @@ void decRefCount(ImageViewId id)
 
 ImageViewRC makeImageView(const MakeImageView& info)
 {
-	vk::ImageViewInfo infoVk = { .image = info.image.id.getHandle() };
+	vk::ImageViewInfo infoVk = {
+		.image = info.image.id.getHandle(),
+		.baseMipLevel = info.baseMipLevel,
+		.numMipLevels = info.numMipLevels
+	};
 	const u32 e = acquireImageViewEntry();
 	RU.imageViews_image[e] = info.image;
 	RU.imageViews_vk[e] = RU.device.createImageView(infoVk);
@@ -801,6 +805,15 @@ void decRefCount(MaterialId id)
 	}
 }
 
+void MaterialManager::resetMaterial(MaterialRC material, MaterialDataAccessor accesor)
+{
+	u32 dataSize;
+	serializeEditableMaterial(accesor, nullptr, dataSize);
+	auto alloc = getStackTmpAllocator().alloc<u8>(dataSize);
+	serializeEditableMaterial(accesor, alloc.ptr, dataSize);
+	resetMaterial(material, CSpan<u8>(alloc.ptr, dataSize));
+}
+
 u32 registerMaterialManager(const MaterialManager& mgr)
 {
 	const u32 mgrId = u32(mgr.type());
@@ -815,6 +828,9 @@ u32 registerMaterialManagerT(MgrT* mgr)
 		.managerPtr = mgr,
 		._createMaterial = [](void* self, CSpan<u8> data) {
 			return ((MgrT*)self)->createMaterial(data);
+		},
+		._resetMaterial = [](void* self, MaterialRC material, CSpan<u8> data) {
+			return ((MgrT*)self)->resetMaterial(material, data);
 		},
 		._destroyMaterial = [](void* self, MaterialId id) {
 			((MgrT*)self)->destroyMaterial(id);
@@ -871,6 +887,36 @@ MaterialRC material_getOrLoadFromFile(ZStrView path)
 	RU.materials_pathBag.addPath(path, materialId.id.id);
 
 	return materialId;
+}
+
+void material_resetFromMemFile(MaterialRC material, CSpan<u8> data)
+{
+	const u32 materialTypeU = u32(material.id.getType());
+	auto& mgr = RU.materialManagers[materialTypeU];
+
+	mgr.resetMaterial(material, data);
+}
+
+void material_resetFromFile(MaterialRC material, ZStrView path)
+{
+	const u32 materialTypeU = u32(material.id.getType());
+	auto& mgr = RU.materialManagers[materialTypeU];
+
+	auto fileTmp = loadBinaryFile_tmp(path);
+	material_resetFromMemFile(material, CSpan<u8>(fileTmp.alloc.ptr, fileTmp.size));
+}
+
+void material_resetFromAccessor(MaterialRC material, MaterialDataAccessor accessor)
+{
+	if (material.id.getType() != accessor.materialType) {
+		printf("changing material type is not supported\n");
+		assert(false);
+		return;
+	}
+
+	const u32 materialTypeU = u32(accessor.materialType);
+	auto& mgr = RU.materialManagers[materialTypeU];
+	mgr.resetMaterial(material, accessor);
 }
 
 MaterialDataAccessor createEditableMaterial(MaterialType type)
@@ -1162,14 +1208,7 @@ VkPipeline PbrMaterialManager::getCreatePipeline(bool hasAlbedoTexture, bool has
 	return p;
 }
 
-enum class PbrFileFlags {
-	doubleSided,
-	generateMips_albedo,
-	generateMips_normals,
-	generateMips_metallicRoughness,
-};
-
-struct MaterialReader {
+struct SerialReader {
 	CSpan<u8> serializedData;
 	u32 offset = 0;
 
@@ -1188,18 +1227,47 @@ struct MaterialReader {
 	}
 };
 
-static u32 packPbrFlagsU32(PbrFlagSet fs)
+PbrMaterialCreateInfo PbrMaterialManager::createInfoFromData(CSpan<u8> serializedData)
 {
-	u32 flags = 0;
-	auto considerFlag = [&flags](PbrFileFlags flag, bool enable) {
-		if (enable)
-			flags |= u32(1) << u32(flag);
+	PbrMaterialCreateInfo materialInfo;
+	SerialReader R{ serializedData };
+
+#ifdef NDEBUG
+	offset = sizeof(MaterialType);
+#else
+	MaterialType type;
+	R.read(type);
+	assert(type == MaterialType::PBR);
+#endif
+
+	R.read(materialInfo.albedo);
+	R.read(materialInfo.metallic);
+	R.read(materialInfo.roughness);
+
+	PbrFlagSet flags;
+	R.read(flags.bits);
+
+	R.read(materialInfo.anisotropicFiltering);
+
+	auto readImage = [&](ImageViewRC& imageView, bool srgb, bool generateMips) {
+		std::string_view path = R.readStr();
+		if (path.empty())
+			return;
+
+		auto img = getOrLoadImage(Path(path), srgb, generateMips);
+		if (!img.id.isValid())
+			return;
+
+		imageView = makeImageView({ .image = img, .numMipLevels = u16(generateMips ? -1 : 1) });
 	};
-	considerFlag(PbrFileFlags::doubleSided, fs.doubleSided);
-	considerFlag(PbrFileFlags::generateMips_albedo, fs.generateMips_albedo);
-	considerFlag(PbrFileFlags::generateMips_normals, fs.generateMips_normals);
-	considerFlag(PbrFileFlags::generateMips_metallicRoughness, fs.generateMips_metallicRoughness);
-	return flags;
+
+	readImage(materialInfo.albedoImageView, true, flags.has(PbrFlag::generateMips_albedo));
+	readImage(materialInfo.normalsImageView, false, flags.has(PbrFlag::generateMips_normals));
+	readImage(materialInfo.metallicRoughnessImageView, false, flags.has(PbrFlag::generateMips_metallicRoughness));
+
+	materialInfo.doubleSided = flags.has(PbrFlag::doubleSided);
+
+	return materialInfo;
 }
 
 PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialCreateInfo& params)
@@ -1208,11 +1276,23 @@ PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialCreateInfo& pa
 	const bool hasNormalTexture = params.normalsImageView.id.isValid();
 	const bool hasMetallicRoughnessTexture = params.metallicRoughnessImageView.id.isValid();
 	const auto descSetLayout = getCreateDescriptorSetLayout(hasAlbedoTexture, hasNormalTexture, hasMetallicRoughnessTexture);
+
 	VkDescriptorSet descSet;
 	vk::ASSERT_VKRES(RU.device.allocDescriptorSets(descPool.getHandleVk(), descSetLayout, {&descSet, 1}));
 	const u32 entry = acquireMaterialEntry(*this);
-	materials_info[entry] = params;
 	materials_descSet[entry] = descSet;
+
+	PbrMaterialRC id(type, entry);
+	resetMaterial(id, params);
+
+	return std::move(id);
+}
+
+void PbrMaterialManager::resetMaterial(MaterialRC material, const PbrMaterialCreateInfo& params)
+{
+	const u32 entry = material.id.getIdU32();
+	materials_info[entry] = params;
+	const VkDescriptorSet& descSet = materials_descSet[entry];
 
 	const size_t bufferOffset = sizeof(PbrUniforms) * entry;
 	const PbrUniforms values = {
@@ -1223,7 +1303,7 @@ PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialCreateInfo& pa
 	stageData(uniformBuffer, tk::asBytesSpan(values), bufferOffset);
 
 	vk::DescriptorSetWrite descSetWrites[4] = {
-		{	.descSet = descSet,
+		{.descSet = descSet,
 			.binding = 0,
 			.type = vk::DescriptorType::uniformBuffer,
 			.bufferInfo = {
@@ -1254,50 +1334,16 @@ PbrMaterialRC PbrMaterialManager::createMaterial(const PbrMaterialCreateInfo& pa
 	addWriteImgIfNeeded(params.metallicRoughnessImageView, 3);
 
 	RU.device.writeDescriptorSets({ descSetWrites, numWrites });
-	return PbrMaterialRC(type, entry);
 }
 
 MaterialRC PbrMaterialManager::createMaterial(CSpan<u8> serializedData)
 {
-	PbrMaterialCreateInfo materialInfo;
-	MaterialReader R{serializedData};
+	return createMaterial(createInfoFromData(serializedData));
+}
 
-#ifdef NDEBUG
-	offset = sizeof(MaterialType);
-#else
-	MaterialType type;
-	R.read(type);
-	assert(type == MaterialType::PBR);
-#endif
-
-	R.read(materialInfo.albedo);
-	R.read(materialInfo.metallic);
-	R.read(materialInfo.roughness);
-
-	u32 flags;
-	R.read(flags);
-	auto getFlag = [&flags](PbrFileFlags i) { return flags & (u32(1) << u32(i)); };
-
-	auto readImage = [&](ImageViewRC& imageView, bool srgb, bool generateMips) {
-		std::string_view path = R.readStr();
-		if (path.empty())
-			return;
-
-		auto img = getOrLoadImage(Path(path), srgb, generateMips);
-		if (!img.id.isValid())
-			return;
-
-		imageView = makeImageView({ .image = img });
-	};
-
-	readImage(materialInfo.albedoImageView, true, getFlag(PbrFileFlags::generateMips_albedo));
-	readImage(materialInfo.normalsImageView, false, getFlag(PbrFileFlags::generateMips_normals));
-	readImage(materialInfo.metallicRoughnessImageView, false, getFlag(PbrFileFlags::generateMips_metallicRoughness));
-
-	R.read(materialInfo.anisotropicFiltering);
-	materialInfo.doubleSided = getFlag(PbrFileFlags::doubleSided);
-
-	return createMaterial(materialInfo);
+void PbrMaterialManager::resetMaterial(MaterialRC material, CSpan<u8> serializedData)
+{
+	resetMaterial(material, createInfoFromData(serializedData));
 }
 
 void PbrMaterialManager::destroyMaterial(MaterialId id)
@@ -1342,11 +1388,11 @@ void PbrMaterialManager::serialize(const PbrMaterialSerializeInfo& info, u8* buf
 		sizeof(info.albedo) +
 		sizeof(info.metallic) +
 		sizeof(info.roughness) +
-		sizeof(u32) + // flags
+		sizeof(PbrFlagSet) + // flags
+		sizeof(info.anisotropicFiltering) +
 		sizeof(u16) + info.albedoImage.length() +
 		sizeof(u16) + info.normalsImage.length() +
-		sizeof(u16) + info.metallicRoughnessImage.length() +
-		sizeof(info.anisotropicFiltering);
+		sizeof(u16) + info.metallicRoughnessImage.length();
 
 	if (buffer == nullptr || capacity < size)
 		return;
@@ -1362,17 +1408,17 @@ void PbrMaterialManager::serialize(const PbrMaterialSerializeInfo& info, u8* buf
 			write(c);
 	};
 
-	const u32 flags = packPbrFlagsU32(info.flags);
+	const auto flagsBits = info.flags.bits;
 
 	write(MaterialType::PBR);
 	write(info.albedo);
 	write(info.metallic);
 	write(info.roughness);
+	write(flagsBits);
+	write(info.anisotropicFiltering);
 	writeStr(info.albedoImage);
 	writeStr(info.normalsImage);
 	writeStr(info.metallicRoughnessImage);
-	write(info.anisotropicFiltering);
-	write(flags);
 }
 
 tk::SaveFileResult PbrMaterialManager::serializeToFile(const PbrMaterialSerializeInfo& info, ZStrView path)
@@ -1381,7 +1427,6 @@ tk::SaveFileResult PbrMaterialManager::serializeToFile(const PbrMaterialSerializ
 	serialize(info, nullptr, size);
 	auto buffer_alloc = tk::getStackTmpAllocator().alloc<u8>(size);
 	serialize(info, buffer_alloc.ptr, size);
-
 	return tk::saveBinaryFile({ buffer_alloc.ptr, size }, path);
 }
 
@@ -1390,49 +1435,50 @@ struct PbrEditableData {
 	glm::vec4 albedo;
 	float metallic = 0;
 	float roughness = 1;
-	float anisotropicFiltering = 1;
 	PbrFlagSet flags;
+	float anisotropicFiltering = 1;
 	std::string albedoImage;
 	std::string normalsImage;
 	std::string metallicRoughnessImage;
 };
 static ConstStr k_pbrFieldNames[] = {
 	"albedo", "metallic", "roughness",
-	"anisotropic filtering",
 	"albedo generate mipmaps", "normals generate mipmaps", "metallic roughness nerate mipmaps", "double sided",
+	"anisotropic filtering",
 	"albedo image", "normals image", "metallic roughness image"
 };
 static constexpr u32 k_pbrNumFields = std::size(k_pbrFieldNames);
 static const MaterialFieldType k_pbrFieldTypes[] = {
 	MaterialFieldType::f32_4, MaterialFieldType::f32, MaterialFieldType::f32,
-	MaterialFieldType::f32,
 	MaterialFieldType::b8, MaterialFieldType::b8, MaterialFieldType::b8, MaterialFieldType::b8,
+	MaterialFieldType::f32,
 	MaterialFieldType::image, MaterialFieldType::image, MaterialFieldType::image
 };
 static_assert(k_pbrNumFields == std::size(k_pbrFieldTypes));
 
 #define FIELD_CASE_GET(case_ind, fieldName) case case_ind: memcpy(fieldData.data(), data + offsetof(MyMaterialEditableData, fieldName), sizeof(MyMaterialEditableData::fieldName)); break
-#define FIELD_CASE_GET_BOOL_FLAG(case_ind, flagName) case case_ind: fieldData[0] = reinterpret_cast<MyMaterialFlagSet*>(data + offsetof(MyMaterialEditableData, flags))->flagName; break
+#define FIELD_CASE_GET_BOOL_FLAG(case_ind, flagName) case case_ind: fieldData[0] = reinterpret_cast<MyMaterialFlagSet*>(data + offsetof(MyMaterialEditableData, flags))->has(MyMaterialFlag::flagName); break
 #define FIELD_CASE_GET_STRING(case_ind, fieldName) case case_ind: *(ZStrView*)fieldData.data() = reinterpret_cast<MyMaterialEditableData*>(data)->fieldName; break
 
 #define FIELD_CASE_SET(case_ind, fieldName) case case_ind: memcpy(data + offsetof(MyMaterialEditableData, fieldName), fieldData.data(), sizeof(MyMaterialEditableData::fieldName)); break;
-#define FIELD_CASE_SET_BOOL_FLAG(case_ind, flagName) case case_ind: reinterpret_cast<MyMaterialFlagSet*>(data + offsetof(MyMaterialEditableData, flags))->flagName = fieldData[0]; break
+#define FIELD_CASE_SET_BOOL_FLAG(case_ind, flagName) case case_ind: *reinterpret_cast<MyMaterialFlagSet*>(data + offsetof(MyMaterialEditableData, flags)) |= MyMaterialFlag::flagName; break
 #define FIELD_CASE_SET_STRING(case_ind, fieldName) case case_ind: reinterpret_cast<MyMaterialEditableData*>(data)->fieldName = std::string(*(ZStrView*)fieldData.data()); break
 
 MaterialDataAccessor PbrMaterialManager::createEditableMaterial(CSpan<u8> serializedData)
 {
 	typedef PbrEditableData MyMaterialEditableData;
+	typedef PbrFlag MyMaterialFlag;
 	typedef PbrFlagSet MyMaterialFlagSet;
 
 	#define FIELD_CASES(GET_OR_SET) \
 		FIELD_CASE_ ## GET_OR_SET (0, albedo); \
 		FIELD_CASE_ ## GET_OR_SET (1, metallic); \
 		FIELD_CASE_ ## GET_OR_SET (2, roughness); \
-		FIELD_CASE_ ## GET_OR_SET (3, anisotropicFiltering); \
-		FIELD_CASE_ ## GET_OR_SET ## _BOOL_FLAG(4, generateMips_albedo); \
-		FIELD_CASE_ ## GET_OR_SET ## _BOOL_FLAG(5, generateMips_normals); \
-		FIELD_CASE_ ## GET_OR_SET ## _BOOL_FLAG(6, generateMips_metallicRoughness); \
-		FIELD_CASE_ ## GET_OR_SET ## _BOOL_FLAG(7, doubleSided); \
+		FIELD_CASE_ ## GET_OR_SET ## _BOOL_FLAG(3, generateMips_albedo); \
+		FIELD_CASE_ ## GET_OR_SET ## _BOOL_FLAG(4, generateMips_normals); \
+		FIELD_CASE_ ## GET_OR_SET ## _BOOL_FLAG(5, generateMips_metallicRoughness); \
+		FIELD_CASE_ ## GET_OR_SET ## _BOOL_FLAG(6, doubleSided); \
+		FIELD_CASE_ ## GET_OR_SET (7, anisotropicFiltering); \
 		FIELD_CASE_ ## GET_OR_SET ## _STRING(8, albedoImage); \
 		FIELD_CASE_ ## GET_OR_SET ## _STRING(9, normalsImage); \
 		FIELD_CASE_ ## GET_OR_SET ## _STRING(10, metallicRoughnessImage)
@@ -1462,19 +1508,19 @@ MaterialDataAccessor PbrMaterialManager::createEditableMaterial(CSpan<u8> serial
 
 	#undef FIELD_CASES
 
-	auto ED = new PbrEditableData{ .vtable = vtable };
-	MaterialReader R{ serializedData };
+	auto ED = new PbrEditableData{ .vtable = vtable }; // TODO: optimize; don't use new!
+	SerialReader R{ serializedData };
 	MaterialType type;
 	R.read(type);
 	assert(type == MaterialType::PBR);
 	R.read(ED->albedo);
 	R.read(ED->metallic);
 	R.read(ED->roughness);
+	R.read(ED->flags);
+	R.read(ED->anisotropicFiltering);
 	ED->albedoImage = R.readStr();
 	ED->normalsImage = R.readStr();
 	ED->metallicRoughnessImage = R.readStr();
-	R.read(ED->anisotropicFiltering);
-	R.read(ED->flags);
 
 	return MaterialDataAccessor {
 		.materialType = type,
@@ -1490,20 +1536,21 @@ void PbrMaterialManager::destroyEditableMaterial(MaterialDataAccessor& ma)
 
 static PbrMaterialSerializeInfo pbrMaterial_editable_to_serializeInfo(const MaterialDataAccessor& editableMaterial)
 {
+	PbrFlagSet flags = {};
+
 	return PbrMaterialSerializeInfo {
 		.albedo = editableMaterial.getField<MaterialFieldType::f32_4>(0),
 		.metallic = editableMaterial.getField<MaterialFieldType::f32>(1),
 		.roughness = editableMaterial.getField<MaterialFieldType::f32>(2),
+		.flags = PbrFlagSet()
+			.set(PbrFlag::generateMips_albedo, editableMaterial.getField<MaterialFieldType::b8>(3))
+			.set(PbrFlag::generateMips_normals, editableMaterial.getField<MaterialFieldType::b8>(4))
+			.set(PbrFlag::generateMips_metallicRoughness, editableMaterial.getField<MaterialFieldType::b8>(5))
+			.set(PbrFlag::doubleSided, editableMaterial.getField<MaterialFieldType::b8>(6)),
+		.anisotropicFiltering = editableMaterial.getField<MaterialFieldType::f32>(7),
 		.albedoImage = editableMaterial.getField<MaterialFieldType::image>(8),
 		.normalsImage = editableMaterial.getField<MaterialFieldType::image>(9),
 		.metallicRoughnessImage = editableMaterial.getField<MaterialFieldType::image>(10),
-		.anisotropicFiltering = editableMaterial.getField<MaterialFieldType::f32>(3),
-		.flags = PbrFlagSet {
-			.generateMips_albedo = editableMaterial.getField<MaterialFieldType::b8>(4),
-			.generateMips_normals = editableMaterial.getField<MaterialFieldType::b8>(5),
-			.generateMips_metallicRoughness = editableMaterial.getField<MaterialFieldType::b8>(6),
-			.doubleSided = editableMaterial.getField<MaterialFieldType::b8>(7),
-		}
 	};
 }
 
@@ -1673,18 +1720,32 @@ WireframeMaterialManager::WireframeMaterialManager(u32 maxExpectedMaterials)
 	});
 }
 
+WireframeMaterialInfo WireframeMaterialManager::createInfoFromData(CSpan<u8> serializedData)
+{
+	WireframeMaterialInfo materialInfo;
+	SerialReader R{ serializedData };
+
+#ifdef NDEBUG
+	offset = sizeof(MaterialType);
+#else
+	MaterialType type;
+	R.read(type);
+	assert(type == MaterialType::WIREFRAME);
+#endif
+
+	R.read(materialInfo.color);
+	return materialInfo;
+}
+
 WireframeMaterialRC WireframeMaterialManager::createMaterial(const WireframeMaterialInfo& params)
 {
+	const u32 entry = acquireMaterialEntry(*this);
+
 	VkDescriptorSet descSet;
 	vk::ASSERT_VKRES(RU.device.allocDescriptorSets(descPool.getHandleVk(), descSetLayout, { &descSet, 1 }));
-	const u32 entry = acquireMaterialEntry(*this);
-	materials_info[entry] = params;
 	materials_descSet[entry] = descSet;
 
 	const size_t bufferOffset = sizeof(WireframeUniforms) * entry;
-	const WireframeUniforms values = { .color = params.color };
-	stageData(uniformBuffer, tk::asBytesSpan(values), bufferOffset);
-
 	vk::DescriptorSetWrite descSetWrite = {
 		.descSet = descSet,
 		.binding = 0,
@@ -1695,14 +1756,32 @@ WireframeMaterialRC WireframeMaterialManager::createMaterial(const WireframeMate
 			.range = sizeof(WireframeUniforms),
 		}
 	};
+	RU.device.writeDescriptorSets({ &descSetWrite, 1 });
 
-	RU.device.writeDescriptorSets({ &descSetWrite, 1});
-	return WireframeMaterialRC(type, entry);
+	WireframeMaterialRC material(type, entry);
+	resetMaterial(material, params);
+
+	return std::move(material);
+}
+
+void WireframeMaterialManager::resetMaterial(MaterialRC material, const WireframeMaterialInfo& params)
+{
+	const u32 entry = material.id.getIdU32();
+	materials_info[entry] = params;
+
+	const size_t bufferOffset = sizeof(WireframeUniforms) * entry;
+	const WireframeUniforms values = { .color = params.color };
+	stageData(uniformBuffer, tk::asBytesSpan(values), bufferOffset);
 }
 
 MaterialRC WireframeMaterialManager::createMaterial(CSpan<u8> serializedData)
 {
-	return MaterialRC{};
+	return createMaterial(createInfoFromData(serializedData));
+}
+
+void WireframeMaterialManager::resetMaterial(MaterialRC material, CSpan<u8> serializedData)
+{
+	resetMaterial(material, createInfoFromData(serializedData));
 }
 
 void WireframeMaterialManager::destroyMaterial(MaterialId id)
@@ -1731,6 +1810,17 @@ void WireframeMaterialManager::serialize(const WireframeMaterialSerializeInfo& i
 
 	write(MaterialType::WIREFRAME);
 	write(info.color);
+}
+
+tk::SaveFileResult WireframeMaterialManager::serializeToFile(const WireframeMaterialSerializeInfo& info, ZStrView path)
+{
+	// TODO: has the exact same implementation as PBR: take common factor
+	u32 size = 0;
+	serialize(info, nullptr, size);
+	auto buffer_alloc = tk::getStackTmpAllocator().alloc<u8>(size);
+	serialize(info, buffer_alloc.ptr, size);
+
+	return tk::saveBinaryFile({ buffer_alloc.ptr, size }, path);
 }
 
 struct WireframeMaterialEditableData {
@@ -2538,7 +2628,7 @@ void RenderWorld::_sortAndDefragmentObjects()
 
 		const u32 R = u32(max - min) + 1;
 		auto valOffsets_alloc = tk::getStackTmpAllocator().alloc<u32>(R);
-		auto valOffsets = std::span(valOffsets_alloc.ptr, R);
+		auto valOffsets = std::span<u32>(valOffsets_alloc.ptr, R);
 		for (size_t i = 0; i < R; i++) {
 			if (objects_mesh[0][i].id.isValid()) {
 				const u32 ind = u32(objects_layer[0][i] - min);

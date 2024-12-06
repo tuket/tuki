@@ -36,16 +36,6 @@ enum class AttribSemantic {
 };
 enum class HasVertexNormalsOrTangents { no, normals, normalsAndTangents, };
 
-struct ImageInfo {
-    vk::Format format = vk::Format::undefined;
-    u16 w = 0, h = 1, depth = 1; // TODO: maybe use u16?
-    u8 numMips = 1;
-    ImageType type = ImageType::_2d;
-
-    u16 getNumLayers() const { return type == ImageType::_3d ? u16(1) : depth; }
-    // TODO: we are assuming that the image is just for sampling in the fragment shader, we should have options for other use cases
-};
-
 // id handles
 template <typename T>
 struct IdT {
@@ -99,6 +89,16 @@ void onWindowResized(u32 w, u32 h);
 ShaderCompiler& getShaderCompiler();
 
 // IMAGES
+struct ImageInfo {
+    vk::Format format = vk::Format::undefined;
+    u16 w = 0, h = 1, depth = 1; // TODO: maybe use u16?
+    u8 numMips = 1;
+    ImageType type = ImageType::_2d;
+
+    u16 getNumLayers() const { return type == ImageType::_3d ? u16(1) : depth; }
+    // TODO: we are assuming that the image is just for sampling in the fragment shader, we should have options for other use cases
+};
+
 struct ImageId : IdU32 {
     bool operator==(ImageId o)const { return id == o.id; }
     ImageInfo getInfo()const;
@@ -128,7 +128,8 @@ typedef RefCounted<ImageViewId> ImageViewRC;
 
 struct MakeImageView {
     ImageRC image;
-
+    u16 baseMipLevel = 0;
+    u16 numMipLevels = u16(-1);
 };
 ImageViewRC makeImageView(const MakeImageView& info);
 
@@ -295,14 +296,6 @@ template<> struct MaterialFieldTypeT<MaterialFieldType::f32_3> { using type = gl
 template<> struct MaterialFieldTypeT<MaterialFieldType::f32_4> { using type = glm::vec4; };
 template<> struct MaterialFieldTypeT<MaterialFieldType::image> { using type = ZStrView; };
 
-//template<typename T> struct MaterialFieldV;
-//template<> struct MaterialFieldV<bool> { static constexpr MaterialFieldType val = MaterialFieldType::b8; };
-//template<> struct MaterialFieldV<float> { static constexpr MaterialFieldType val = MaterialFieldType::f32; };
-//template<> struct MaterialFieldV<glm::vec2> { static constexpr MaterialFieldType val = MaterialFieldType::f32_2; };
-//template<> struct MaterialFieldV<glm::vec3> { static constexpr MaterialFieldType val = MaterialFieldType::f32_3; };
-//template<> struct MaterialFieldV<glm::vec4> { static constexpr MaterialFieldType val = MaterialFieldType::f32_4; };
-//template<> struct MaterialFieldV<ZStrView> { static constexpr MaterialFieldType val = MaterialFieldType::texture; };
-
 /*
 Allows accessing the properties of the data field of a material.
 The idea is to be able to edit the material without knowledge of the underlying type.
@@ -347,6 +340,7 @@ struct MaterialDataAccessor
 struct MaterialManager {
     void* managerPtr = nullptr;
     MaterialRC(*_createMaterial)(void*, CSpan<u8> data) = nullptr;
+    void(*_resetMaterial)(void*, MaterialRC material, CSpan<u8> data) = nullptr;
     void(*_destroyMaterial)(void*, MaterialId) = nullptr;
     VkPipeline(*_getPipeline)(void*, MaterialId, GeomId) = nullptr;
     VkPipelineLayout(*_getPipelineLayout)(void*, MaterialId) = nullptr;
@@ -357,6 +351,8 @@ struct MaterialManager {
     void (*_serializeEditableMaterial)(void*, const MaterialDataAccessor&, u8* data, u32& size) = nullptr;
 
     MaterialRC createMaterial(CSpan<u8> data) { return _createMaterial(managerPtr, data); }
+    void resetMaterial(MaterialRC material, CSpan<u8> data) { _resetMaterial(managerPtr, material, data); }
+    void resetMaterial(MaterialRC material, MaterialDataAccessor accesor);
     void destroyMaterial(MaterialId materialId) { _destroyMaterial(managerPtr, materialId); }
     VkPipeline getPipeline(MaterialId materialId, GeomId geomId) { return _getPipeline(managerPtr, materialId, geomId); }
     VkPipelineLayout getPipelineLayout(MaterialId materialId) { return _getPipelineLayout(managerPtr, materialId); }
@@ -372,6 +368,9 @@ u32 registerMaterialManager(const MaterialManager& backbacks);
 
 MaterialRC material_createFromMemFile(CSpan<u8> data);
 MaterialRC material_getOrLoadFromFile(ZStrView path);
+void material_resetFromMemFile(MaterialRC material, CSpan<u8> data);
+void material_resetFromFile(MaterialRC material, ZStrView path);
+void material_resetFromAccessor(MaterialRC material, MaterialDataAccessor accessor);
 
 MaterialDataAccessor createEditableMaterial(MaterialType type);
 MaterialDataAccessor createEditableMaterial(CSpan<u8> serializedData);
@@ -401,21 +400,24 @@ struct PbrMaterialCreateInfo {
     float anisotropicFiltering = 1.f;
     bool doubleSided = false;
 };
-struct PbrFlagSet {
-    bool generateMips_albedo : 1 = true;
-    bool generateMips_normals : 1 = true;
-    bool generateMips_metallicRoughness : 1 = true;
-    bool doubleSided : 1 = false;
+
+enum class PbrFlag {
+    generateMips_albedo,
+    generateMips_normals,
+    generateMips_metallicRoughness,
+    doubleSided
 };
+using PbrFlagSet = tk::FlagSet<u32, PbrFlag>;
+
 struct PbrMaterialSerializeInfo {
     glm::vec4 albedo = glm::vec4(1.f);
     float metallic = 0.f;
     float roughness = 1.f;
+    PbrFlagSet flags;
+    float anisotropicFiltering = 1.f;
     std::string_view albedoImage = {};
     std::string_view normalsImage = {};
     std::string_view metallicRoughnessImage = {};
-    float anisotropicFiltering = 1.f;
-    PbrFlagSet flags;
 };
 
 struct PbrMaterialId : MaterialId {
@@ -451,8 +453,11 @@ struct PbrMaterialManager {
     VkPipeline getCreatePipeline(bool hasAlbedoTexture, bool hasNormalTexture, bool hasMetallicRoughnessTexture,
         HasVertexNormalsOrTangents hasVertexNormalsOrTangents, bool hasTexCoords, bool hasVertexColors, bool doubleSided);
 
+    static PbrMaterialCreateInfo createInfoFromData(CSpan<u8> serializedData);
     PbrMaterialRC createMaterial(const PbrMaterialCreateInfo& params);
+    void resetMaterial(MaterialRC material, const PbrMaterialCreateInfo& params);
     MaterialRC createMaterial(CSpan<u8> serializedData);
+    void resetMaterial(MaterialRC material, CSpan<u8> serializedData);
     void destroyMaterial(MaterialId id);
 
     VkPipeline getPipeline(MaterialId materialId, GeomId geomId);
@@ -497,8 +502,11 @@ struct WireframeMaterialManager {
 
     WireframeMaterialManager(u32 maxExpectedMaterials);
 
+    static WireframeMaterialInfo createInfoFromData(CSpan<u8> serializedData);
     WireframeMaterialRC createMaterial(const WireframeMaterialInfo& params);
+    void resetMaterial(MaterialRC material, const WireframeMaterialInfo& params);
     MaterialRC createMaterial(CSpan<u8> data);
+    void resetMaterial(MaterialRC material, CSpan<u8> serializedData);
     void destroyMaterial(MaterialId id);
 
     VkPipeline getPipeline(MaterialId materialId, GeomId geomId) { return pipeline; }

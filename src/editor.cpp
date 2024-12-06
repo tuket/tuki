@@ -20,6 +20,8 @@ using tk::CStr;
 using tk::u8;
 using tk::u32;
 
+typedef tk::UniqueResource < VkDescriptorSet, decltype([](VkDescriptorSet s) { tg::releaseImguiDescSet(s); }) > DescSet;
+
 static const bool imguiEnable = true;
 static const bool generateShadersDebugInfo = true;
 
@@ -303,28 +305,218 @@ static void imgui_hierarchy(tk::WorldId world)
 	ImGui::End();
 }
 
-static bool endsWith(std::string_view str, std::string_view ending)
+static bool endsWith(std::string_view str, std::string_view ending, bool caseSensitive = false)
 {
 	if (str.size() < ending.size())
 		return false;
 	for (int i = 0; i < ending.size(); i++) {
-		if (ending[ending.size() - 1 - i] != str[str.size() - 1 - i])
+		char c = str[str.size() - 1 - i];
+		if (!caseSensitive)
+			c = std::tolower(c);
+		if (ending[ending.size() - 1 - i] != c)
 			return false;
 	}
 	return true;
 }
 
 template <typename Str>
-static int endsWithN(std::string_view str, CSpan<Str> endings)
+static int endsWithN(std::string_view str, CSpan<Str> endings, bool caseSensitive = false)
 {
 	for (int i = 0; i < int(endings.size()); i++) {
-		if (endsWith(str, endings[i]))
+		if (endsWith(str, endings[i], caseSensitive))
 			return i;
 	}
 	return -1;
 }
 
-typedef tk::UniqueResource<VkDescriptorSet, decltype([](VkDescriptorSet s) { tg::releaseImguiDescSet(s); }) > DescSet;
+static CStr fileNameToIcon(CStr name, bool folder, bool isOpen = false)
+{
+	CStr iconStr = "";
+	if (folder) {
+		iconStr = isOpen ? iconCodes.openedFolder : iconCodes.closedFolder;
+	}
+	else {
+		if (endsWithN(name, CSpan(k_imageFileExtensions)) != -1)
+			iconStr = iconCodes.imageFile;
+		else if (endsWith(name, ".txt"))
+			iconStr = iconCodes.textFile;
+		else if (endsWith(name, ".geom"))
+			iconStr = iconCodes.geomFile;
+		else if (endsWith(name, ".mtrl"))
+			iconStr = iconCodes.materialFile;
+		else
+			iconStr = iconCodes.genericFile;
+	}
+	return iconStr;
+}
+
+enum class FileType : u32 { image, wildcard };
+typedef tk::FlagSet<u32, FileType> FileTypeFilter;
+
+
+enum class FolderClickedAction { ENTER, COLLAPSE, CUSTOM };
+typedef void (*FileClickedAcctionCallback)(void* userData, CStr path);
+
+struct FileTreeConfig {
+	void* userData = nullptr;
+	std::span<char> currentDir = {};
+	//FileType fileTypes = FileType::any;
+	FolderClickedAction folderClickedAction = FolderClickedAction::COLLAPSE;
+	FileClickedAcctionCallback folderClickedActionCB = nullptr;
+	FileClickedAcctionCallback fileClickedActionCB = nullptr;
+};
+
+static bool fileTreeNode(const FileTreeConfig& config, CStr label, CStr path, bool folder)
+{
+	auto& g = *GImGui;
+	ImGuiWindow* window = g.CurrentWindow;
+
+	const ImGuiID id = window->GetID(label);
+	const ImGuiID icon_id = ImHashStr("icon", 0, id);
+	const glm::vec2 pos = window->DC.CursorPos;
+
+	const float buttonSize = g.FontSize + g.Style.FramePadding.y * 2;
+
+	const bool opened = ImGui::TreeNodeBehaviorIsOpen(id);
+	CStr iconStr = fileNameToIcon(label, folder, opened);
+
+	ImRect bb(pos, ImVec2(pos.x + ImGui::GetContentRegionAvail().x, pos.y + g.FontSize + g.Style.FramePadding.y * 2));
+	const ImRect icon_bb = { pos, pos + glm::vec2(buttonSize) };
+	const ImRect label_bb = { pos + glm::vec2(buttonSize, 0), bb.Max };
+
+	auto onClicked = [&](bool folder) {
+		if (folder) {
+			if (config.folderClickedAction == FolderClickedAction::COLLAPSE) {
+				window->DC.StateStorage->SetInt(id, opened ? 0 : 1);
+			}
+			else if (config.folderClickedAction == FolderClickedAction::ENTER) {
+				assert(config.currentDir.size());
+				strncpy(config.currentDir.data(), path, config.currentDir.size());
+				return false;
+			}
+			else if (config.folderClickedActionCB) {
+				config.folderClickedActionCB(config.userData, path);
+			}
+		}
+		else {
+			config.fileClickedActionCB(config.userData, path);
+		}
+	};
+
+	// icon button
+	bool icon_hovered, icon_held;
+	const ImGuiButtonFlags buttonFlags = folder ? 0 : ImGuiButtonFlags_PressedOnDoubleClick;
+	if (ImGui::ButtonBehavior(icon_bb, icon_id, &icon_hovered, &icon_held, buttonFlags))
+		onClicked(folder);
+
+	bool label_hovered = false, label_held = false;
+	if (ImGui::ButtonBehavior(label_bb, id, &label_hovered, &label_held, buttonFlags))
+		onClicked(folder);
+
+	if (icon_hovered || label_hovered || icon_held || label_held) {
+		const auto eColor = icon_held || label_held ? ImGuiCol_HeaderActive : ImGuiCol_HeaderHovered;
+		window->DrawList->AddRectFilled(bb.Min, bb.Max, ImColor(ImGui::GetStyle().Colors[eColor]));
+	}
+
+	// draw icon
+	ImGui::RenderText(glm::vec2(pos.x, pos.y + 2 * g.Style.FramePadding.y), iconStr);
+	// draw text
+	ImGui::RenderText(ImVec2(pos.x + buttonSize + g.Style.ItemInnerSpacing.x, pos.y + g.Style.FramePadding.y), label);
+
+	ImGui::ItemSize(icon_bb, g.Style.FramePadding.y);
+	ImGui::ItemAdd(icon_bb, icon_id);
+	ImGui::SameLine();
+	ImGui::ItemSize(label_bb, g.Style.FramePadding.y);
+	ImGui::ItemAdd(label_bb, id);
+
+	if (opened)
+		ImGui::TreePush(label);
+
+	return opened;
+}
+
+struct FilePickDialog {
+	std::string title = "Pick File";
+	std::string pickedFile = ""; // empty means closed
+	FileTypeFilter fileTypeFilter = {};
+	char currentDir[256];
+	FileTreeConfig fileTreeConfig = {
+		.userData = this,
+		.currentDir = currentDir,
+		.folderClickedAction = FolderClickedAction::ENTER,
+		.fileClickedActionCB = [](void* userData, CStr path) {
+			auto& self = *(FilePickDialog*)userData;
+			self.pickedFile = path;
+		},
+	};
+	const FileTreeConfig fileTreeConfigUpperFolder = {
+		.userData = this,
+		.folderClickedAction = FolderClickedAction::CUSTOM,
+		.folderClickedActionCB = [](void* userData, CStr path) {
+			auto& self = *(FilePickDialog*)userData;
+			for (int i = strlen(self.currentDir) - 1; i >= 0; i--) {
+				const char c = self.currentDir[i];
+				self.currentDir[i] = '\0';
+				if (c == '/')
+					break;
+			}
+		},
+	};
+
+	std::string label()const
+	{
+		char buffer[128];
+		snprintf(buffer, std::size(buffer), "%s##%p", title.c_str(), this);
+		return buffer;
+	}
+
+	void open()
+	{
+		ImGui::OpenPopup(label().c_str(), 0);
+		currentDir[0] = '\0';
+		pickedFile = "";
+	}
+
+	bool filePassesFilter(CStr name)const
+	{
+		if (fileTypeFilter.has(FileType::wildcard))
+			return true;
+		if (fileTypeFilter.has(FileType::image))
+			return endsWithN(name, CSpan(k_imageFileExtensions)) != -1;
+		return false;
+	}
+
+	bool run()
+	{
+		ImGui::SetNextWindowSize({ 400, 400 }, ImGuiCond_Appearing);
+		if (ImGui::BeginPopupModal(label().c_str(), nullptr, 0)) {
+			const bool weAreInRoot = currentDir[0] == '\0';
+			if(!weAreInRoot)
+				fileTreeNode(fileTreeConfigUpperFolder, "..", currentDir, true);
+
+			PHYSFS_enumerateFilesCallback(currentDir, [](void* userData, const char* dirPath, const char* fileName) {
+				auto& self = *(FilePickDialog*)userData;
+				const bool folder = PHYSFS_isDirectory(fileName);
+				if (folder || self.filePassesFilter(fileName)) {
+					const u32 maxPathSize = 512;
+					auto fullPath = tk::getStackTmpAllocator().alloc<char>(maxPathSize);
+					snprintf(fullPath.ptr, maxPathSize, "%s%s", dirPath, fileName);
+					fileTreeNode(self.fileTreeConfig, fileName, fullPath.ptr, folder);
+				}
+			}, this);
+
+			if (pickedFile.size())
+				ImGui::CloseCurrentPopup();
+
+			ImGui::EndPopup();
+
+			if (pickedFile.size())
+				return true;
+		}
+
+		return false;
+	}
+};
 
 struct FilePreviews {
 	struct TextPreview {
@@ -556,10 +748,12 @@ struct FilePreviews {
 	{
 		std::string path;
 		tg::MaterialDataAccessor editableMaterial;
+		tg::MaterialRC materialRC;
 
 		MaterialPreview(tk::ZStrView path)
 			: path(path)
 			, editableMaterial(tg::createEditableMaterial(path))
+			, materialRC(tg::material_getOrLoadFromFile(path))
 		{
 
 		}
@@ -626,11 +820,13 @@ struct FilePreviews {
 					const int bufferSize = 512;
 					auto bufferAlloc = tk::getStackTmpAllocator().alloc<char>(bufferSize);
 					snprintf(bufferAlloc.ptr, bufferSize, "%.*s", int(val.length()), val.data());
+					static FilePickDialog filePickDialog{ .fileTypeFilter = {FileType::image} };
 					if (ImGui::SmallButton(bufferAlloc.ptr)) {
-						CStr filterPatterns[] = { "*.png", "*.jpg" };
-						char* path = tinyfd_openFileDialog("Select Image", "./", std::size(filterPatterns), filterPatterns, "image files", 0);
-						if (path)
-							editableMaterial.setField<FT::image>(fieldI, tk::ZStrView(path));
+						filePickDialog.open();
+					}
+					if (filePickDialog.run()) {
+						editableMaterial.setField<FT::image>(fieldI, tk::ZStrView(filePickDialog.pickedFile));
+						modified = true;
 					}
 				} break;
 
@@ -651,10 +847,9 @@ struct FilePreviews {
 			bool open = true;
 			ImGui::Begin(path.c_str(), &open);
 
-			/*if (editableMaterial.customGuiDraw)
-				editableMaterial.customGuiDraw();
-			else*/
-				genericGuiDraw();
+			if (genericGuiDraw()) {
+				tg::material_resetFromAccessor(materialRC, editableMaterial);
+			}
 
 			ImGui::End();
 
@@ -767,85 +962,15 @@ struct FilePreviews {
 };
 static FilePreviews filePreviews;
 
-static bool fileTreeNode(CStr label, CStr path, bool folder)
-{
-	auto& g = *GImGui;
-	ImGuiWindow* window = g.CurrentWindow;
-
-	const ImGuiID id = window->GetID(label);
-	const ImGuiID icon_id = ImHashStr("icon", 0, id);
-	const glm::vec2 pos = window->DC.CursorPos;
-
-	const bool opened = folder && ImGui::TreeNodeBehaviorIsOpen(id);
-
-	CStr iconStr = "";
-	if (folder) {
-		iconStr = opened ? iconCodes.openedFolder : iconCodes.closedFolder;
-	}
-	else {
-		if (endsWithN(label, CSpan(k_imageFileExtensions)) != -1)
-			iconStr = iconCodes.imageFile;
-		else if (endsWith(label, ".txt"))
-			iconStr = iconCodes.textFile;
-		else if (endsWith(label, ".geom"))
-			iconStr = iconCodes.geomFile;
-		else if (endsWith(label, ".mtrl"))
-			iconStr = iconCodes.materialFile;
-		else
-			iconStr = iconCodes.genericFile;
-	}
-	const float buttonSize = g.FontSize + g.Style.FramePadding.y * 2;
-
-	ImRect bb(pos, ImVec2(pos.x + ImGui::GetContentRegionAvail().x, pos.y + g.FontSize + g.Style.FramePadding.y * 2));
-	const ImRect icon_bb = { pos, pos + glm::vec2(buttonSize) };
-	const ImRect label_bb = { pos + glm::vec2(buttonSize, 0), bb.Max };
-
-	// icon button
-	bool icon_hovered, icon_held;
-	if (folder) {
-		if (ImGui::ButtonBehavior(icon_bb, icon_id, &icon_hovered, &icon_held)) {
-			window->DC.StateStorage->SetInt(id, opened ? 0 : 1);
-		}
-	}
-	else {
-		if (ImGui::ButtonBehavior(icon_bb, icon_id, &icon_hovered, &icon_held, ImGuiButtonFlags_PressedOnDoubleClick)) {
-			// open preview
-			filePreviews.openFilePreview(path);
-		}
-	}
-
-	bool label_hovered = false, label_held = false;
-	if (ImGui::ButtonBehavior(label_bb, id, &label_hovered, &label_held)) {
-		window->DC.StateStorage->SetInt(id, opened ? 0 : 1);
-	}
-
-	if (icon_hovered || label_hovered || icon_held || label_held) {
-		const auto eColor = icon_held || label_held ? ImGuiCol_HeaderActive : ImGuiCol_HeaderHovered;
-		window->DrawList->AddRectFilled(bb.Min, bb.Max, ImColor(ImGui::GetStyle().Colors[eColor]));
-	}
-
-	// draw icon
-	ImGui::RenderText(glm::vec2(pos.x, pos.y + 2*g.Style.FramePadding.y), iconStr);
-	// draw text
-	ImGui::RenderText(ImVec2(pos.x + buttonSize + g.Style.ItemInnerSpacing.x, pos.y + g.Style.FramePadding.y), label);
-
-	ImGui::ItemSize(icon_bb, g.Style.FramePadding.y);
-	ImGui::ItemAdd(icon_bb, icon_id);
-	ImGui::SameLine();
-	ImGui::ItemSize(label_bb, g.Style.FramePadding.y);
-	ImGui::ItemAdd(label_bb, id);
-
-	if (opened)
-		ImGui::TreePush(label);
-
-	return opened;
-}
-
-
 struct ProjectExplorer
 {
 	char tmpPath[512];
 	u32 tmpPathLen;
+	const FileTreeConfig fileTreeConfig{
+		.userData = this,
+		.folderClickedAction = FolderClickedAction::COLLAPSE,
+		.fileClickedActionCB = [](void* userData, CStr path){ filePreviews.openFilePreview(path); }
+	};
 
 	void drawDirectory()
 	{
@@ -866,14 +991,14 @@ struct ProjectExplorer
 			if (PHYSFS_stat(tmpPath, &stat)) {
 				if (stat.filetype == PHYSFS_FILETYPE_DIRECTORY) {
 					ImGuiStorage* storage = ImGui::GetStateStorage();
-					if (fileTreeNode(child, tmpPath, true)) {
+					if (fileTreeNode(fileTreeConfig, child, tmpPath, true)) {
 						drawDirectory();
 						ImGui::TreePop();
 					}
 				}
 				else {
 					//ImGui::TreeNodeEx(child, ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen);
-					fileTreeNode(child, tmpPath, false);
+					fileTreeNode(fileTreeConfig, child, tmpPath, false);
 				}
 			}
 			else {
@@ -946,8 +1071,9 @@ int main(int argc, char** argv)
 
 	pbrMgr.serializeToFile({
 		.albedo = {1, 0, 0, 1},
-		.albedoImage = "crate.png",
+		//.flags = {tg::PbrFlag::generateMips_albedo},
 		.anisotropicFiltering = 16.f,
+		.albedoImage = "crate.png",
 	}, "red_crate.mtrl");
 
 	CSpan<u8> cubeGeomData[] = { tk::asBytesSpan(cubeInds), tk::asBytesSpan(cubeVerts_positions), tk::asBytesSpan(cubeVerts_normals), tk::asBytesSpan(cubeVerts_colors) };
