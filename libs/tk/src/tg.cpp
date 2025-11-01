@@ -428,7 +428,7 @@ ImageViewRC makeImageView(const MakeImageView& info)
 	vk::ImageViewInfo infoVk = {
 		.image = info.image.id.getHandle(),
 		.baseMipLevel = info.baseMipLevel,
-		.numMipLevels = info.numMipLevels
+		.numMipLevels = info.numMipLevels,
 	};
 	const u32 e = acquireImageViewEntry();
 	RU.imageViews_image[e] = info.image;
