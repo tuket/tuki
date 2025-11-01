@@ -67,5 +67,3 @@ else()
 	add_library(glm::glm ALIAS glm)
 	target_link_libraries(glm INTERFACE glm-header-only)
 endif()
-
-target_compile_definitions(glm PUBLIC GLM_ENABLE_EXPERIMENTAL)

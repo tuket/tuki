@@ -1,6 +1,6 @@
 #include "tk.hpp"
 
-#include <glm/gtx/quaternion.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
 #include <physfs.h>
 #include <Tracy.hpp>
