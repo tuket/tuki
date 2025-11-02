@@ -403,6 +403,16 @@ static constexpr T nextPowerOf2(T x) noexcept
     return x;
 }
 
+// aligns x to alignP2, where alignP2 is a power of 2
+template <typename T>
+static constexpr T alignToP2(T x, T alignP2)
+{
+    const T mask = alignP2 - 1;
+    if (x & mask)
+        return (x & ~mask) + alignP2;
+    return x;
+}
+
 template <typename Int>
 static void appendBits(size_t& y, Int x, size_t numBits) {
     using UInt = std::make_unsigned_t<Int>;

@@ -465,6 +465,7 @@ struct PhysicalDeviceInfo {
 	VkPhysicalDeviceFeatures features;
 	VkPhysicalDeviceProperties props;
 	VkPhysicalDeviceMemoryProperties memProps;
+	VkPhysicalDeviceLimits limits;
 	std::vector<VkQueueFamilyProperties> queueFamiliesProps;
 	std::vector<bool> queueFamiliesPresentSupported;
 

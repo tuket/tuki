@@ -1294,7 +1294,8 @@ void PbrMaterialManager::resetMaterial(MaterialRC material, const PbrMaterialCre
 	materials_info[entry] = params;
 	const VkDescriptorSet& descSet = materials_descSet[entry];
 
-	const size_t bufferOffset = sizeof(PbrUniforms) * entry;
+	const size_t minOffsetAlign = RU.device.physicalDevice.props.limits.minUniformBufferOffsetAlignment;
+	const size_t bufferOffset = alignToP2(sizeof(PbrUniforms) * entry, minOffsetAlign);
 	const PbrUniforms values = {
 		.albedo = params.albedo,
 		.metallic = params.metallic,
